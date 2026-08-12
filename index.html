@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>🕌 Arabisch Vorlesen – Aussprache-App</title>
+<style>
+  :root {
+    --green: #16a34a; --yellow: #eab308; --red: #dc2626;
+    --primary: #2563eb; --gray: #6b7280;
+    --bg: #f7f7f5; --card: #fff; --border: #e5e5e5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--bg); color: #1f2937;
+    margin: 0; padding: 20px;
+    display: flex; justify-content: center; min-height: 100vh;
+  }
+  .app { width: 100%; max-width: 560px; display: flex; flex-direction: column; gap: 14px; }
+  h1 { margin: 0; font-size: 22px; text-align: center; }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 14px; padding: 18px;
+  }
+  input[type="url"] {
+    width: 100%; padding: 10px; font-size: 14px;
+    border: 1px solid #d1d5db; border-radius: 8px;
+  }
+  details summary { cursor: pointer; color: var(--gray); font-size: 13px; }
+  .progress {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 14px; color: var(--gray); margin-bottom: 6px;
+  }
+  .bar {
+    flex: 1; height: 8px; background: #e5e5e5; border-radius: 4px; overflow: hidden;
+  }
+  .bar > div { height: 100%; background: var(--primary); transition: width 0.3s; }
+  .word-target {
+    font-family: "Amiri", "Traditional Arabic", serif;
+    font-size: 84px; direction: rtl; text-align: center;
+    padding: 16px 8px 4px; line-height: 1.2; color: #111827;
+  }
+  .word-de {
+    text-align: center; font-size: 18px; color: var(--gray);
+    padding-bottom: 6px;
+  }
+  .mic-btn {
+    width: 100%; padding: 22px; font-size: 22px; font-weight: 700;
+    border: none; border-radius: 14px; cursor: pointer;
+    color: white; background: var(--primary);
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    transition: transform 0.1s, background 0.2s;
+  }
+  .mic-btn:active { transform: scale(0.98); }
+  .mic-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .mic-btn.recording { background: var(--red); animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.75 } }
+  .hint { font-size: 13px; color: var(--gray); text-align: center; margin-top: 8px; }
+  .result-letters {
+    font-family: "Amiri", serif; font-size: 68px; direction: rtl;
+    text-align: center; padding: 10px 0; line-height: 1.3;
+  }
+  .letter { margin: 0 6px; display: inline-block; }
+  .letter.good { color: var(--green); }
+  .letter.mid  { color: var(--yellow); }
+  .letter.bad  { color: var(--red); }
+  .heard-row {
+    text-align: center; font-size: 14px; color: var(--gray); margin-top: 4px;
+  }
+  .heard-row b {
+    font-family: "Amiri", serif; font-size: 30px; color: #111827;
+    direction: rtl; display: inline-block; margin: 0 4px; vertical-align: middle;
+  }
+  .score-bar {
+    margin-top: 14px; height: 14px; background: #e5e5e5; border-radius: 7px; overflow: hidden;
+  }
+  .score-bar > div { height: 100%; transition: width 0.4s, background 0.4s; }
+  .score-label {
+    text-align: center; margin-top: 8px; font-size: 16px; font-weight: 700;
+  }
+  .nav { display: flex; gap: 10px; }
+  .nav button {
+    flex: 1; padding: 14px; font-size: 15px; font-weight: 600;
+    border: none; border-radius: 10px; cursor: pointer;
+    background: #e5e7eb; color: #1f2937;
+  }
+  .nav button.primary { background: var(--green); color: white; }
+  .nav button:disabled { opacity: 0.5; cursor: not-allowed; }
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>🕌 Arabisch Vorlesen</h1>
+
+  <details class="card">
+    <summary>⚙️ Einstellungen (Backend-URL)</summary>
+    <div style="margin-top:10px;">
+      <input type="url" id="api" placeholder="https://xxxx.trycloudflare.com" />
+      <div class="hint" style="margin-top:6px;text-align:left;">
+        Aus dem Colab-Notebook <code>wav2vec2_arabic_pronunciation.ipynb</code> (endet auf <code>.trycloudflare.com</code>). Wird lokal gespeichert.
+      </div>
+    </div>
+  </details>
+
+  <div class="card">
+    <div class="progress">
+      <span id="progress-text">Wort 1 / 100</span>
+      <div class="bar"><div id="progress-bar" style="width:1%"></div></div>
+    </div>
+    <div class="word-target" id="word-ar">…</div>
+    <div class="word-de" id="word-de">…</div>
+  </div>
+
+  <div class="card">
+    <button class="mic-btn" id="mic-btn">🎤 Vorlesen</button>
+    <div class="hint" id="status">Tippe auf „Vorlesen" und sprich das Wort deutlich aus.</div>
+  </div>
+
+  <div class="card" id="result-card" style="display:none;">
+    <div class="result-letters" id="result-letters"></div>
+    <div class="heard-row">Du hast gesagt: <b id="heard">—</b></div>
+    <div class="score-bar"><div id="score-fill" style="width:0%"></div></div>
+    <div class="score-label" id="score-label">…</div>
+  </div>
+
+  <div class="nav">
+    <button id="prev-btn">← Zurück</button>
+    <button id="retry-btn">🔄 Nochmal</button>
+    <button id="next-btn" class="primary">Weiter →</button>
+  </div>
+</div>
+
+<script>
+// 100 Wörter für Kinder 6–12, Anfänger-Arabisch.
+// ar: vokalisiert (zum Anzeigen). Backend entfernt Diakritika automatisch (mode=char).
+const WORDS = [
+  // Zahlen 1–10
+  { ar:"وَاحِد",     de:"eins" },
+  { ar:"اِثْنَان",    de:"zwei" },
+  { ar:"ثَلَاثَة",    de:"drei" },
+  { ar:"أَرْبَعَة",   de:"vier" },
+  { ar:"خَمْسَة",     de:"fünf" },
+  { ar:"سِتَّة",      de:"sechs" },
+  { ar:"سَبْعَة",     de:"sieben" },
+  { ar:"ثَمَانِيَة",  de:"acht" },
+  { ar:"تِسْعَة",     de:"neun" },
+  { ar:"عَشَرَة",     de:"zehn" },
+  // Familie
+  { ar:"أَب",          de:"Vater" },
+  { ar:"أُم",          de:"Mutter" },
+  { ar:"أَخ",          de:"Bruder" },
+  { ar:"أُخْت",        de:"Schwester" },
+  { ar:"جَدّ",         de:"Großvater" },
+  { ar:"جَدَّة",       de:"Großmutter" },
+  { ar:"عَمّ",         de:"Onkel" },
+  { ar:"عَمَّة",       de:"Tante" },
+  { ar:"اِبْن",        de:"Sohn" },
+  { ar:"بِنْت",        de:"Tochter" },
+  // Farben
+  { ar:"أَحْمَر",      de:"rot" },
+  { ar:"أَزْرَق",      de:"blau" },
+  { ar:"أَخْضَر",      de:"grün" },
+  { ar:"أَصْفَر",      de:"gelb" },
+  { ar:"أَبْيَض",      de:"weiß" },
+  { ar:"أَسْوَد",      de:"schwarz" },
+  { ar:"بُرْتُقَالِي", de:"orange" },
+  { ar:"وَرْدِي",      de:"rosa" },
+  { ar:"بُنِّي",       de:"braun" },
+  { ar:"رَمَادِي",     de:"grau" },
+  // Tiere
+  { ar:"قِطّ",         de:"Katze" },
+  { ar:"كَلْب",        de:"Hund" },
+  { ar:"حِصَان",       de:"Pferd" },
+  { ar:"بَقَرَة",      de:"Kuh" },
+  { ar:"دَجَاجَة",     de:"Huhn" },
+  { ar:"سَمَك",        de:"Fisch" },
+  { ar:"طَائِر",       de:"Vogel" },
+  { ar:"أَسَد",        de:"Löwe" },
+  { ar:"فِيل",         de:"Elefant" },
+  { ar:"أَرْنَب",      de:"Hase" },
+  // Körper
+  { ar:"رَأْس",        de:"Kopf" },
+  { ar:"يَد",          de:"Hand" },
+  { ar:"قَدَم",        de:"Fuß" },
+  { ar:"عَيْن",        de:"Auge" },
+  { ar:"أُذُن",        de:"Ohr" },
+  { ar:"أَنْف",        de:"Nase" },
+  { ar:"فَم",          de:"Mund" },
+  { ar:"قَلْب",        de:"Herz" },
+  { ar:"شَعْر",        de:"Haar" },
+  { ar:"سِنّ",         de:"Zahn" },
+  // Essen & Trinken
+  { ar:"خُبْز",        de:"Brot" },
+  { ar:"مَاء",         de:"Wasser" },
+  { ar:"حَلِيب",       de:"Milch" },
+  { ar:"تُفَّاحَة",    de:"Apfel" },
+  { ar:"مَوْز",        de:"Banane" },
+  { ar:"جُبْن",        de:"Käse" },
+  { ar:"بَيْض",        de:"Ei" },
+  { ar:"أَرُزّ",       de:"Reis" },
+  { ar:"لَحْم",        de:"Fleisch" },
+  { ar:"عَسَل",        de:"Honig" },
+  // Schule
+  { ar:"كِتَاب",       de:"Buch" },
+  { ar:"قَلَم",        de:"Stift" },
+  { ar:"مَدْرَسَة",    de:"Schule" },
+  { ar:"مُعَلِّم",     de:"Lehrer" },
+  { ar:"طَالِب",       de:"Schüler" },
+  { ar:"دَرْس",        de:"Unterricht" },
+  { ar:"حَقِيبَة",     de:"Tasche" },
+  { ar:"طَاوِلَة",     de:"Tisch" },
+  { ar:"كُرْسِي",      de:"Stuhl" },
+  { ar:"سَبُّورَة",    de:"Tafel" },
+  // Natur
+  { ar:"شَمْس",        de:"Sonne" },
+  { ar:"قَمَر",        de:"Mond" },
+  { ar:"نَجْم",        de:"Stern" },
+  { ar:"سَمَاء",       de:"Himmel" },
+  { ar:"مَطَر",        de:"Regen" },
+  { ar:"رِيح",         de:"Wind" },
+  { ar:"بَحْر",        de:"Meer" },
+  { ar:"جَبَل",        de:"Berg" },
+  { ar:"شَجَرَة",      de:"Baum" },
+  { ar:"زَهْرَة",      de:"Blume" },
+  // Alltag & Zuhause
+  { ar:"بَيْت",        de:"Haus" },
+  { ar:"بَاب",         de:"Tür" },
+  { ar:"نَافِذَة",     de:"Fenster" },
+  { ar:"سَيَّارَة",    de:"Auto" },
+  { ar:"طَرِيق",       de:"Straße" },
+  { ar:"مَدِينَة",     de:"Stadt" },
+  { ar:"سُوق",         de:"Markt" },
+  { ar:"مَسْجِد",      de:"Moschee" },
+  { ar:"حَدِيقَة",     de:"Garten" },
+  { ar:"مِفْتَاح",     de:"Schlüssel" },
+  // Grüße & Zeit
+  { ar:"سَلَام",       de:"Frieden / Hallo" },
+  { ar:"شُكْرًا",      de:"Danke" },
+  { ar:"نَعَم",        de:"Ja" },
+  { ar:"لَا",          de:"Nein" },
+  { ar:"صَبَاح",       de:"Morgen (Vormittag)" },
+  { ar:"مَسَاء",       de:"Abend" },
+  { ar:"لَيْل",        de:"Nacht" },
+  { ar:"يَوْم",        de:"Tag" },
+  { ar:"أَمْس",        de:"gestern" },
+  { ar:"غَدًا",        de:"morgen (Tag)" },
+];
+
+const $ = (id) => document.getElementById(id);
+const apiInput = $("api");
+const wordAr = $("word-ar"), wordDe = $("word-de");
+const progText = $("progress-text"), progBar = $("progress-bar");
+const micBtn = $("mic-btn"), statusEl = $("status");
+const resultCard = $("result-card"), resultLetters = $("result-letters"), heardEl = $("heard");
+const scoreFill = $("score-fill"), scoreLabel = $("score-label");
+const prevBtn = $("prev-btn"), retryBtn = $("retry-btn"), nextBtn = $("next-btn");
+
+const STATE_KEY = "arabicApp.v1";
+let state = { idx: 0, apiUrl: "" };
+try { state = { ...state, ...JSON.parse(localStorage.getItem(STATE_KEY) || "{}") }; } catch {}
+
+const MAX_RECORD_MS = 3500;
+let mediaRecorder = null, chunks = [], recording = false, recStopTimer = null;
+
+apiInput.value = state.apiUrl;
+apiInput.addEventListener("change", () => {
+  state.apiUrl = apiInput.value.trim().replace(/\/$/, "");
+  saveState();
+});
+
+function saveState() { localStorage.setItem(STATE_KEY, JSON.stringify(state)); }
+
+function renderWord() {
+  const w = WORDS[state.idx];
+  wordAr.textContent = w.ar;
+  wordDe.textContent = w.de;
+  progText.textContent = `Wort ${state.idx + 1} / ${WORDS.length}`;
+  progBar.style.width = `${((state.idx + 1) / WORDS.length) * 100}%`;
+  resultCard.style.display = "none";
+  setStatus('Tippe auf „Vorlesen" und sprich das Wort deutlich aus.');
+  prevBtn.disabled = state.idx === 0;
+  nextBtn.disabled = state.idx >= WORDS.length - 1;
+}
+
+function setStatus(text) { statusEl.textContent = text; }
+
+async function startRecording() {
+  if (!state.apiUrl) {
+    setStatus('⚠️ Bitte zuerst Backend-URL eintragen (oben unter „Einstellungen").');
+    return;
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1, sampleRate: 16000,
+        echoCancellation: true, noiseSuppression: true, autoGainControl: true,
+      },
+    });
+  } catch (e) {
+    setStatus("❌ Mikrofon-Zugriff fehlgeschlagen: " + e.message);
+    return;
+  }
+
+  chunks = [];
+  const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+    ? "audio/webm;codecs=opus"
+    : (MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : "");
+  mediaRecorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+  mediaRecorder.ondataavailable = (e) => e.data.size > 0 && chunks.push(e.data);
+  mediaRecorder.onstop = async () => {
+    stream.getTracks().forEach(t => t.stop());
+    const blob = new Blob(chunks, { type: chunks[0]?.type || "audio/webm" });
+    await sendAudio(blob);
+  };
+  mediaRecorder.start();
+  recording = true;
+  micBtn.classList.add("recording");
+  micBtn.textContent = "⏹ Stopp";
+  setStatus("🔴 Aufnahme läuft… sprich jetzt das Wort.");
+  recStopTimer = setTimeout(stopRecording, MAX_RECORD_MS);
+}
+
+function stopRecording() {
+  if (!recording) return;
+  recording = false;
+  clearTimeout(recStopTimer);
+  micBtn.classList.remove("recording");
+  micBtn.textContent = "🎤 Vorlesen";
+  micBtn.disabled = true;
+  setStatus("⏳ Auswertung läuft…");
+  try { mediaRecorder.stop(); } catch {}
+}
+
+async function sendAudio(blob) {
+  const w = WORDS[state.idx];
+  const form = new FormData();
+  form.append("audio", blob, "recording.webm");
+  form.append("target", w.ar);
+  form.append("mode", "char");
+  try {
+    const r = await fetch(state.apiUrl + "/assess", { method: "POST", body: form });
+    if (!r.ok) {
+      const txt = await r.text().catch(() => "");
+      throw new Error(`HTTP ${r.status} ${txt.slice(0, 120)}`);
+    }
+    const data = await r.json();
+    showResult(data);
+  } catch (e) {
+    setStatus("❌ Server-Fehler: " + e.message);
+  } finally {
+    micBtn.disabled = false;
+  }
+}
+
+function showResult(data) {
+  const html = (data.units || []).map(u => {
+    const cls = u.score >= 75 ? "good" : u.score >= 50 ? "mid" : "bad";
+    return `<span class="letter ${cls}">${u.label}</span>`;
+  }).join("");
+  resultLetters.innerHTML = html || "—";
+  heardEl.textContent = (data.transcription || "").trim() || "—";
+
+  const total = Math.round(data.total || 0);
+  const color = total >= 75 ? "var(--green)" : total >= 50 ? "var(--yellow)" : "var(--red)";
+  scoreFill.style.width = total + "%";
+  scoreFill.style.background = color;
+  const emoji = total >= 75 ? "🌟 Sehr gut!" : total >= 50 ? "🙂 Fast!" : "💪 Nochmal versuchen!";
+  scoreLabel.textContent = `${emoji}  ${total} / 100`;
+  scoreLabel.style.color = color;
+
+  resultCard.style.display = "block";
+  setStatus('Fertig – tippe „Weiter" oder „Nochmal".');
+}
+
+micBtn.addEventListener("click", () => (recording ? stopRecording() : startRecording()));
+prevBtn.addEventListener("click", () => {
+  if (state.idx > 0) { state.idx--; saveState(); renderWord(); }
+});
+nextBtn.addEventListener("click", () => {
+  if (state.idx < WORDS.length - 1) { state.idx++; saveState(); renderWord(); }
+});
+retryBtn.addEventListener("click", () => {
+  resultCard.style.display = "none";
+  setStatus("Bereit für den nächsten Versuch.");
+});
+
+renderWord();
+</script>
+</body>
+</html>
