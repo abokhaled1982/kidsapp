@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { View, Text, TextInput, TouchableOpacity, KeyboardAvoidingView, Platform } from "react-native";
+import { View, Text, TextInput, Pressable, KeyboardAvoidingView, Platform, StyleSheet } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
-import { X, Check, HeartHandshake } from "lucide-react-native";
+import { Ionicons } from "@expo/vector-icons";
 import { useBackend } from "@/store/useBackend";
 import { pingHealth } from "@/lib/api";
 
@@ -21,44 +21,84 @@ export default function SettingsScreen() {
     if (ok) setTimeout(() => router.back(), 700);
   };
 
+  const btnLabel =
+    check === "checking" ? "Prüfe…" :
+    check === "ok" ? "Gespeichert!" :
+    check === "fail" ? "Nicht erreichbar" : "Speichern & Verbinden";
+
   return (
-    <SafeAreaView className="flex-1 bg-paper-50">
-      <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} className="flex-1">
-        <View className="flex-row items-center justify-between px-5 py-3">
-          <Text className="font-display text-xl text-ink-900">Einstellungen</Text>
-          <TouchableOpacity onPress={() => router.back()} className="w-10 h-10 rounded-full bg-white items-center justify-center border border-ink-300/40">
-            <X size={20} color="#334155" />
-          </TouchableOpacity>
+    <SafeAreaView style={styles.root}>
+      <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
+        <View style={styles.headerRow}>
+          <Text style={styles.title}>Einstellungen</Text>
+          <Pressable onPress={() => router.back()} style={styles.closeBtn}>
+            <Ionicons name="close" size={22} color="#334155" />
+          </Pressable>
         </View>
 
-        <View className="px-5 pt-4 gap-3">
-          <Text className="font-body text-ink-700">Backend-URL</Text>
+        <View style={styles.body}>
+          <Text style={styles.label}>Backend-URL</Text>
           <TextInput
             value={draft}
             onChangeText={setDraft}
             placeholder="https://xxxx.trycloudflare.com"
+            placeholderTextColor="#94a3b8"
             autoCapitalize="none"
             autoCorrect={false}
             keyboardType="url"
-            className="bg-white border border-ink-300/40 rounded-xl2 px-4 py-3 font-body text-ink-900"
-            style={{ borderRadius: 22 }}
+            style={styles.input}
           />
-          <Text className="font-body text-xs text-ink-500">
-            Aus dem Colab-Notebook wav2vec2_arabic_pronunciation.ipynb. Endet auf .trycloudflare.com.
+          <Text style={styles.hint}>
+            Aus dem Colab-Notebook. Endet auf .trycloudflare.com.
           </Text>
 
-          <TouchableOpacity
-            onPress={save}
-            className="mt-2 py-4 rounded-xl2 bg-brand-500 items-center flex-row justify-center gap-2"
-            style={{ borderRadius: 22 }}
-          >
-            {check === "ok" ? <Check color="white" size={22} /> : <HeartHandshake color="white" size={22} />}
-            <Text className="text-white font-display text-base">
-              {check === "checking" ? "Prüfe…" : check === "ok" ? "Gespeichert!" : check === "fail" ? "Nicht erreichbar" : "Speichern & Verbinden"}
-            </Text>
-          </TouchableOpacity>
+          <Pressable onPress={save} style={styles.saveBtn}>
+            <Ionicons name={check === "ok" ? "checkmark" : "cloud-upload"} size={22} color="white" />
+            <Text style={styles.saveText}>{btnLabel}</Text>
+          </Pressable>
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
+
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: "#f8fafc" },
+  headerRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+  },
+  title: { fontSize: 20, fontWeight: "700", color: "#0f172a" },
+  closeBtn: {
+    width: 40, height: 40, borderRadius: 20, backgroundColor: "white",
+    alignItems: "center", justifyContent: "center",
+    borderWidth: 1, borderColor: "#e2e8f0",
+  },
+  body: { paddingHorizontal: 20, paddingTop: 12, gap: 12 },
+  label: { color: "#334155", fontSize: 14 },
+  input: {
+    backgroundColor: "white",
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    borderRadius: 22,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    fontSize: 15,
+    color: "#0f172a",
+  },
+  hint: { color: "#64748b", fontSize: 12 },
+  saveBtn: {
+    marginTop: 8,
+    backgroundColor: "#3b82f6",
+    borderRadius: 22,
+    paddingVertical: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
+  saveText: { color: "white", fontSize: 15, fontWeight: "700" },
+});

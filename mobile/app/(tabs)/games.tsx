@@ -1,15 +1,22 @@
-import { View, Text } from "react-native";
+import { View, Text, StyleSheet } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { Gamepad2 } from "lucide-react-native";
 
 export default function GamesScreen() {
   return (
-    <SafeAreaView className="flex-1 bg-paper-50 items-center justify-center px-8" edges={["top"]}>
-      <Gamepad2 size={72} color="#7c3aed" />
-      <Text className="font-display text-2xl text-ink-900 mt-6">Spiele</Text>
-      <Text className="font-body text-ink-500 text-center mt-2">
-        Buchstaben-Matching, Wort-Puzzle, Höre-und-Wähle – bald verfügbar.
-      </Text>
+    <SafeAreaView style={styles.root}>
+      <View style={styles.center}>
+        <Text style={styles.emoji}>🎮</Text>
+        <Text style={styles.title}>Spiele</Text>
+        <Text style={styles.sub}>Memory, Buchstaben-Puzzle & mehr kommen bald.</Text>
+      </View>
     </SafeAreaView>
   );
 }
+
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: "#f8fafc" },
+  center: { flex: 1, alignItems: "center", justifyContent: "center", padding: 32 },
+  emoji: { fontSize: 72, marginBottom: 16 },
+  title: { fontSize: 22, fontWeight: "700", color: "#0f172a" },
+  sub: { color: "#64748b", textAlign: "center", marginTop: 8 },
+});

@@ -1,7 +1,7 @@
 export type Word = {
-  ar: string;      // vokalisiert, zur Anzeige
-  de: string;      // deutsche Übersetzung
-  translit?: string; // optionale Umschrift
+  ar: string;
+  de: string;
+  translit?: string;
 };
 
 export type CategoryId =
@@ -15,19 +15,19 @@ export type CategoryId =
 
 export type Category = {
   id: CategoryId;
-  title: string;      // deutsch
-  arabic: string;     // arabischer Kategoriename
+  title: string;
+  arabic: string;
   emoji: string;
-  bg: string;         // Tailwind bg-Klasse für die Kachel
-  fg: string;         // Tailwind text-Klasse
+  color: string;
+  fg: string;
 };
 
 export const CATEGORIES: Category[] = [
-  { id: "zahlen",    title: "Zahlen",   arabic: "الأَرْقَام",  emoji: "🔢", bg: "bg-brand-500",  fg: "text-white" },
-  { id: "farben",    title: "Farben",   arabic: "الأَلْوَان",  emoji: "🎨", bg: "bg-accent-500", fg: "text-white" },
-  { id: "tiere",     title: "Tiere",    arabic: "الحَيَوَانَات", emoji: "🦁", bg: "bg-good-500",   fg: "text-white" },
-  { id: "koerper",   title: "Körper",   arabic: "الجِسْم",     emoji: "🖐️", bg: "bg-pink-500",   fg: "text-white" },
-  { id: "familie",   title: "Familie",  arabic: "العَائِلَة",   emoji: "👨‍👩‍👧", bg: "bg-purple-500", fg: "text-white" },
-  { id: "essen",     title: "Essen",    arabic: "الطَّعَام",    emoji: "🍎", bg: "bg-red-500",    fg: "text-white" },
-  { id: "propheten", title: "Propheten",arabic: "الأَنْبِيَاء",  emoji: "🕌", bg: "bg-emerald-600",fg: "text-white" },
+  { id: "zahlen",    title: "Zahlen",    arabic: "الأَرْقَام",    emoji: "🔢", color: "#3b82f6", fg: "#ffffff" },
+  { id: "farben",    title: "Farben",    arabic: "الأَلْوَان",    emoji: "🎨", color: "#f59e0b", fg: "#ffffff" },
+  { id: "tiere",     title: "Tiere",     arabic: "الحَيَوَانَات", emoji: "🦁", color: "#22c55e", fg: "#ffffff" },
+  { id: "koerper",   title: "Körper",    arabic: "الجِسْم",        emoji: "🖐️", color: "#ec4899", fg: "#ffffff" },
+  { id: "familie",   title: "Familie",   arabic: "العَائِلَة",     emoji: "👨‍👩‍👧", color: "#a855f7", fg: "#ffffff" },
+  { id: "essen",     title: "Essen",     arabic: "الطَّعَام",       emoji: "🍎", color: "#ef4444", fg: "#ffffff" },
+  { id: "propheten", title: "Propheten", arabic: "الأَنْبِيَاء",   emoji: "🕌", color: "#059669", fg: "#ffffff" },
 ];

@@ -1,23 +1,58 @@
-import { View } from "react-native";
-import { MotiView } from "moti";
-import { Mic } from "lucide-react-native";
+import { useEffect, useRef } from "react";
+import { View, Animated, StyleSheet, Easing } from "react-native";
 
-export function PulsingMic({ active, level }: { active: boolean; level: number }) {
-  // level in dB, ca -60..0 → auf 0..1 mappen
-  const norm = Math.max(0, Math.min(1, (level + 60) / 60));
-  const scale = active ? 1 + norm * 0.35 : 1;
+type Props = { active: boolean; level: number };
+
+export function PulsingMic({ active, level }: Props) {
+  const scale = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    if (!active) {
+      scale.setValue(1);
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(scale, { toValue: 1.15, duration: 500, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+        Animated.timing(scale, { toValue: 1, duration: 500, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [active, scale]);
+
+  const loud = (level ?? -60) > -35;
+
   return (
-    <View className="items-center justify-center">
-      <MotiView
-        from={{ scale: 0.9 }}
-        animate={{ scale }}
-        transition={{ type: "timing", duration: 90 }}
-        className={`w-32 h-32 rounded-full items-center justify-center ${
-          active ? "bg-bad-500" : "bg-ink-300"
-        }`}
+    <View style={styles.wrap}>
+      <Animated.View
+        style={[
+          styles.circle,
+          {
+            transform: [{ scale }],
+            backgroundColor: loud ? "#ef4444" : "#f43f5e",
+          },
+        ]}
       >
-        <Mic size={56} color="white" />
-      </MotiView>
+        <Animated.Text style={styles.icon}>🎤</Animated.Text>
+      </Animated.View>
     </View>
   );
 }
+
+const styles = StyleSheet.create({
+  wrap: { alignItems: "center" },
+  circle: {
+    width: 90,
+    height: 90,
+    borderRadius: 45,
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: "#000",
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 5,
+  },
+  icon: { fontSize: 40 },
+});

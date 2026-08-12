@@ -1,27 +1,39 @@
-import { View, Text } from "react-native";
-import { MotiView, MotiText } from "moti";
+import { View, Text, StyleSheet } from "react-native";
 import type { AssessUnit } from "@/lib/api";
 
+function colorFor(score: number): string {
+  if (score >= 0.75) return "#22c55e";
+  if (score >= 0.5) return "#f59e0b";
+  return "#ef4444";
+}
+
 export function LetterFeedback({ units }: { units: AssessUnit[] }) {
+  if (!units?.length) return null;
   return (
-    <View className="flex-row-reverse flex-wrap justify-center items-center gap-x-2 py-2">
-      {units.map((u, i) => {
-        const color =
-          u.score >= 75 ? "text-good-500" :
-          u.score >= 50 ? "text-mid-500"  :
-                          "text-bad-500";
-        return (
-          <MotiText
-            key={i}
-            from={{ opacity: 0, translateY: 12, scale: 0.8 }}
-            animate={{ opacity: 1, translateY: 0, scale: 1 }}
-            transition={{ type: "spring", damping: 12, delay: i * 80 }}
-            className={`font-ar text-[64px] leading-[76px] ${color}`}
-          >
-            {u.label}
-          </MotiText>
-        );
-      })}
+    <View style={styles.row}>
+      {units.map((u, i) => (
+        <View key={`${u.label}-${i}`} style={[styles.chip, { borderColor: colorFor(u.score) }]}>
+          <Text style={[styles.letter, { color: colorFor(u.score) }]}>{u.label}</Text>
+        </View>
+      ))}
     </View>
   );
 }
+
+const styles = StyleSheet.create({
+  row: {
+    flexDirection: "row-reverse",
+    flexWrap: "wrap",
+    gap: 6,
+    justifyContent: "center",
+    marginTop: 8,
+  },
+  chip: {
+    borderWidth: 2,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: "#ffffff",
+  },
+  letter: { fontSize: 22, fontWeight: "700" },
+});

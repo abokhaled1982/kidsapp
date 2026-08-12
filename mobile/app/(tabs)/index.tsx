@@ -1,7 +1,7 @@
-import { View, Text, ScrollView, TouchableOpacity } from "react-native";
+import { View, Text, ScrollView, Pressable, StyleSheet } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
-import { Settings } from "lucide-react-native";
+import { Ionicons } from "@expo/vector-icons";
 import { CATEGORIES } from "@/data/categories";
 import { WORDS } from "@/data/words";
 import { CategoryCard } from "@/components/CategoryCard";
@@ -12,47 +12,42 @@ export default function AussprachHome() {
   const xp = useProgress((s) => s.xp);
   const stars = useProgress((s) => s.stars);
   const mastered = useProgress((s) => s.wordsMastered);
-
   const lv = level(xp);
 
   return (
-    <SafeAreaView className="flex-1 bg-paper-50" edges={["top"]}>
-      <View className="px-5 py-4 flex-row items-center justify-between">
+    <SafeAreaView style={styles.root} edges={["top"]}>
+      <View style={styles.headerRow}>
         <View>
-          <Text className="font-display text-2xl text-ink-900">Salām 👋</Text>
-          <Text className="font-body text-ink-500 mt-0.5">Lass uns Arabisch lernen!</Text>
+          <Text style={styles.hello}>Salām 👋</Text>
+          <Text style={styles.sub}>Lass uns Arabisch lernen!</Text>
         </View>
-        <TouchableOpacity
-          onPress={() => router.push("/settings" as any)}
-          className="w-11 h-11 rounded-full bg-white border border-ink-300/40 items-center justify-center"
-        >
-          <Settings size={20} color="#334155" />
-        </TouchableOpacity>
+        <Pressable onPress={() => router.push("/settings" as any)} style={styles.gearBtn}>
+          <Ionicons name="settings-outline" size={22} color="#334155" />
+        </Pressable>
       </View>
 
-      <View className="mx-5 mb-3 rounded-xl2 p-4 bg-brand-500" style={{ borderRadius: 22 }}>
-        <Text className="text-white font-body text-sm opacity-90">Dein Level</Text>
-        <View className="flex-row items-end justify-between mt-1">
-          <Text className="text-white font-display text-4xl">Lvl {lv}</Text>
-          <View className="flex-row gap-4">
+      <View style={styles.levelCard}>
+        <Text style={styles.levelLabel}>Dein Level</Text>
+        <View style={styles.levelRow}>
+          <Text style={styles.levelValue}>Lvl {lv}</Text>
+          <View style={styles.stats}>
             <Stat label="XP" value={xp} />
             <Stat label="Sterne" value={stars} />
           </View>
         </View>
       </View>
 
-      <ScrollView className="flex-1" contentContainerStyle={{ padding: 20, paddingTop: 8, gap: 12 }}>
-        <Text className="font-display text-lg text-ink-900 mb-1">Kategorien</Text>
-        <View className="flex-row flex-wrap gap-3">
-          {CATEGORIES.map((cat, i) => {
+      <ScrollView contentContainerStyle={styles.scroll}>
+        <Text style={styles.sectionTitle}>Kategorien</Text>
+        <View style={styles.grid}>
+          {CATEGORIES.map((cat) => {
             const items = WORDS[cat.id] ?? [];
-            const masteredCount = items.filter((w) => (mastered[`${cat.id}:${w.ar}`] ?? 0) >= 75).length;
-            const pct = items.length ? masteredCount / items.length : 0;
+            const done = items.filter((w) => (mastered[`${cat.id}:${w.ar}`] ?? 0) >= 75).length;
+            const pct = items.length ? done / items.length : 0;
             return (
-              <View key={cat.id} className="w-[47%]">
+              <View key={cat.id} style={styles.gridItem}>
                 <CategoryCard
                   category={cat}
-                  index={i}
                   progressPct={pct}
                   onPress={() => router.push(`/play/${cat.id}` as any)}
                 />
@@ -67,9 +62,52 @@ export default function AussprachHome() {
 
 function Stat({ label, value }: { label: string; value: number }) {
   return (
-    <View className="items-end">
-      <Text className="text-white font-display text-xl">{value}</Text>
-      <Text className="text-white/80 font-body text-xs">{label}</Text>
+    <View style={{ alignItems: "flex-end" }}>
+      <Text style={{ color: "white", fontSize: 20, fontWeight: "700" }}>{value}</Text>
+      <Text style={{ color: "rgba(255,255,255,0.8)", fontSize: 12 }}>{label}</Text>
     </View>
   );
 }
+
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: "#f8fafc" },
+  headerRow: {
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  hello: { fontSize: 24, fontWeight: "700", color: "#0f172a" },
+  sub: { color: "#64748b", marginTop: 2 },
+  gearBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: "white",
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  levelCard: {
+    marginHorizontal: 20,
+    marginBottom: 12,
+    padding: 16,
+    borderRadius: 22,
+    backgroundColor: "#3b82f6",
+  },
+  levelLabel: { color: "rgba(255,255,255,0.9)", fontSize: 13 },
+  levelRow: {
+    marginTop: 4,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-end",
+  },
+  levelValue: { color: "white", fontSize: 32, fontWeight: "800" },
+  stats: { flexDirection: "row", gap: 16 },
+  scroll: { padding: 20, paddingTop: 4, gap: 12 },
+  sectionTitle: { fontSize: 18, fontWeight: "700", color: "#0f172a", marginBottom: 4 },
+  grid: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
+  gridItem: { width: "47%" },
+});

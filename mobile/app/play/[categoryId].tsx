@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { View, Text, TouchableOpacity, ActivityIndicator, Platform } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { View, Text, Pressable, ActivityIndicator, Platform, StyleSheet, ScrollView } from "react-native";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import * as Haptics from "expo-haptics";
-import { MotiView, MotiText } from "moti";
-import { ChevronLeft, Volume2, RotateCcw, Play } from "lucide-react-native";
+import { Ionicons } from "@expo/vector-icons";
 
 import { CATEGORIES, type CategoryId } from "@/data/categories";
 import { WORDS } from "@/data/words";
@@ -49,11 +48,11 @@ export default function PlayScreen() {
       const key = `${categoryId}:${word.ar}`;
       addResult(key, r.total);
       if (Platform.OS !== "web") {
-        if (r.total >= 75) {
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-        } else {
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-        }
+        Haptics.notificationAsync(
+          r.total >= 75
+            ? Haptics.NotificationFeedbackType.Success
+            : Haptics.NotificationFeedbackType.Warning,
+        );
       }
     } catch (e: any) {
       setErrMsg(e?.message ?? "Netzwerkfehler");
@@ -77,8 +76,7 @@ export default function PlayScreen() {
   };
 
   useEffect(() => {
-    if (!backendUrl) return;
-    if (!word) return;
+    if (!backendUrl || !word) return;
     runWord();
     return () => {
       stopSpeaking();
@@ -90,159 +88,149 @@ export default function PlayScreen() {
   useEffect(() => {
     if (phase !== "result" || !result) return;
     if (result.total >= 75) {
-      nextTimer.current = setTimeout(() => {
-        goNext();
-      }, 1800);
+      nextTimer.current = setTimeout(goNext, 1800);
     }
     return () => { if (nextTimer.current) clearTimeout(nextTimer.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, result]);
 
   const goNext = () => {
-    if (idx >= items.length - 1) {
-      router.back();
-      return;
-    }
+    if (idx >= items.length - 1) { router.back(); return; }
     setIdx(idx + 1);
   };
 
+  const insets = useSafeAreaInsets();
+  const busy = phase === "tts" || phase === "listening" || phase === "processing";
+
   if (!category) {
     return (
-      <SafeAreaView className="flex-1 bg-paper-50 items-center justify-center">
-        <Text className="font-body text-ink-700">Kategorie unbekannt.</Text>
+      <SafeAreaView style={[styles.root, styles.center]}>
+        <Text>Kategorie unbekannt.</Text>
       </SafeAreaView>
     );
   }
 
   if (!backendUrl) {
     return (
-      <SafeAreaView className="flex-1 bg-paper-50 items-center justify-center px-8">
-        <Text className="font-display text-xl text-ink-900 text-center">Erst Backend einrichten</Text>
-        <Text className="font-body text-ink-500 text-center mt-2">
+      <SafeAreaView style={[styles.root, styles.center]}>
+        <Text style={styles.title}>Erst Backend einrichten</Text>
+        <Text style={styles.subMuted}>
           Öffne die Einstellungen und trage die Colab-URL ein.
         </Text>
-        <TouchableOpacity
-          onPress={() => router.push("/settings" as any)}
-          className="mt-4 px-6 py-3 rounded-xl2 bg-brand-500"
-          style={{ borderRadius: 22 }}
-        >
-          <Text className="text-white font-display">Zu den Einstellungen</Text>
-        </TouchableOpacity>
+        <Pressable onPress={() => router.push("/settings" as any)} style={styles.primaryBtn}>
+          <Text style={styles.primaryBtnText}>Zu den Einstellungen</Text>
+        </Pressable>
       </SafeAreaView>
     );
   }
 
   return (
-    <SafeAreaView className="flex-1 bg-paper-50" edges={["top"]}>
-      {/* Header */}
-      <View className="flex-row items-center justify-between px-4 py-2">
-        <TouchableOpacity onPress={() => router.back()} className="w-10 h-10 rounded-full bg-white border border-ink-300/40 items-center justify-center">
-          <ChevronLeft size={22} color="#334155" />
-        </TouchableOpacity>
-        <View className="flex-row items-center gap-2">
-          <Text className="text-2xl">{category.emoji}</Text>
-          <Text className="font-display text-lg text-ink-900">{category.title}</Text>
-        </View>
-        <View className="w-10" />
-      </View>
-
-      {/* Progress bar */}
-      <View className="mx-5 h-2 bg-ink-300/40 rounded-full overflow-hidden">
-        <View className="h-full bg-brand-500" style={{ width: `${((idx + 1) / items.length) * 100}%` }} />
-      </View>
-      <Text className="text-center font-body text-xs text-ink-500 mt-1">Wort {idx + 1} / {items.length}</Text>
-
-      {/* Word display */}
-      <View className="flex-1 justify-center items-center px-6">
-        <MotiView
-          key={`word-${idx}`}
-          from={{ opacity: 0, scale: 0.9 }}
-          animate={{ opacity: 1, scale: 1 }}
-          transition={{ type: "spring", damping: 12 }}
-          className="items-center"
+    <SafeAreaView style={styles.root} edges={["top", "left", "right"]}>
+      <View style={styles.header}>
+        <Pressable
+          onPress={() => router.back()}
+          style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
+          hitSlop={10}
         >
-          <Text
-            className="font-ar text-[92px] leading-[110px] text-ink-900"
-            style={{ writingDirection: "rtl" }}
-          >
-            {word?.ar}
-          </Text>
-          <Text className="font-body text-ink-500 text-lg mt-1">{word?.de}</Text>
-          {word?.translit ? (
-            <Text className="font-body text-ink-500 text-sm mt-1 italic">{word.translit}</Text>
-          ) : null}
-        </MotiView>
+          <Ionicons name="chevron-back" size={22} color="#334155" />
+        </Pressable>
+        <View style={styles.headerCenter}>
+          <Text style={styles.headerEmoji}>{category.emoji}</Text>
+          <Text style={styles.headerTitle} numberOfLines={1}>{category.title}</Text>
+        </View>
+        <View style={{ width: 40 }} />
+      </View>
 
-        {/* Phase-Indikator */}
-        <View className="mt-10 items-center">
+      <View style={styles.progressBg}>
+        <View style={[styles.progressFill, { width: `${((idx + 1) / items.length) * 100}%` }]} />
+      </View>
+      <Text style={styles.progressText}>Wort {idx + 1} / {items.length}</Text>
+
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+        bounces={false}
+      >
+        <View style={styles.wordCard}>
+          <Text style={styles.arabic} allowFontScaling={false}>{word?.ar}</Text>
+          <Text style={styles.de}>{word?.de}</Text>
+          {word?.translit ? <Text style={styles.translit}>{word.translit}</Text> : null}
+        </View>
+
+        <View style={styles.phaseWrap}>
           {phase === "tts" && (
-            <View className="flex-row items-center gap-3">
-              <Volume2 size={28} color="#2563eb" />
-              <Text className="font-body text-brand-600 text-lg">Hör gut zu…</Text>
+            <View style={styles.phaseRow}>
+              <Ionicons name="volume-high" size={26} color="#2563eb" />
+              <Text style={styles.phaseText}>Hör gut zu…</Text>
             </View>
           )}
           {phase === "listening" && (
             <>
               <PulsingMic active level={rec.level} />
-              <Text className="font-body text-bad-500 mt-3 text-lg">Sprich das Wort!</Text>
+              <Text style={[styles.phaseText, { color: "#ef4444", marginTop: 10 }]}>Sprich das Wort!</Text>
             </>
           )}
           {phase === "processing" && (
-            <View className="items-center">
+            <View style={{ alignItems: "center" }}>
               <ActivityIndicator size="large" color="#2563eb" />
-              <Text className="font-body text-ink-500 mt-2">Bewertung…</Text>
+              <Text style={styles.subMuted}>Bewertung…</Text>
             </View>
           )}
           {phase === "error" && (
-            <View className="items-center">
-              <Text className="font-body text-bad-500 text-center">{errMsg}</Text>
-              <TouchableOpacity onPress={runWord} className="mt-4 px-6 py-3 rounded-xl2 bg-brand-500" style={{ borderRadius: 22 }}>
-                <Text className="text-white font-display">Nochmal versuchen</Text>
-              </TouchableOpacity>
+            <View style={{ alignItems: "center" }}>
+              <Text style={{ color: "#ef4444", textAlign: "center" }}>{errMsg}</Text>
+              <Pressable onPress={runWord} style={styles.primaryBtn}>
+                <Text style={styles.primaryBtnText}>Nochmal versuchen</Text>
+              </Pressable>
             </View>
           )}
         </View>
 
-        {/* Ergebnis-Karte */}
         {phase === "result" && result && (
-          <MotiView
-            from={{ opacity: 0, translateY: 20, scale: 0.95 }}
-            animate={{ opacity: 1, translateY: 0, scale: 1 }}
-            transition={{ type: "spring", damping: 14 }}
-            className="mt-6 w-full items-center relative"
-          >
+          <View style={styles.resultCard}>
             <StarBurst show={result.total >= 75} />
             <LetterFeedback units={result.units} />
-            <Text className="font-body text-ink-500 mt-1">
-              Du hast gesagt:{" "}
-              <MotiText className="font-ar text-2xl text-ink-900" style={{ writingDirection: "rtl" }}>
-                {result.transcription || "—"}
-              </MotiText>
+            <Text style={styles.subMuted}>
+              Du hast gesagt: <Text style={styles.arabicSmall}>{result.transcription || "—"}</Text>
             </Text>
             <ScoreBar total={result.total} />
-          </MotiView>
+          </View>
         )}
-      </View>
+      </ScrollView>
 
-      {/* Footer-Aktionen */}
-      <View className="px-5 pb-6 flex-row gap-3">
-        <TouchableOpacity
+      <View
+        style={[
+          styles.footer,
+          { paddingBottom: Math.max(insets.bottom, 12) + 8 },
+        ]}
+      >
+        <Pressable
           onPress={() => { setResult(null); runWord(); }}
-          className="flex-1 py-4 rounded-xl2 bg-white border border-ink-300/40 items-center flex-row justify-center gap-2"
-          style={{ borderRadius: 22 }}
+          disabled={busy}
+          style={({ pressed }) => [
+            styles.footerBtn,
+            styles.footerSecondary,
+            busy && { opacity: 0.5 },
+            pressed && styles.pressed,
+          ]}
         >
-          <RotateCcw size={20} color="#334155" />
-          <Text className="font-display text-ink-900">Nochmal</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
+          <Ionicons name="reload" size={18} color="#334155" />
+          <Text style={styles.footerSecondaryText}>Nochmal</Text>
+        </Pressable>
+        <Pressable
           onPress={goNext}
-          disabled={phase === "tts" || phase === "listening" || phase === "processing"}
-          className="flex-1 py-4 rounded-xl2 bg-good-500 items-center flex-row justify-center gap-2"
-          style={{ borderRadius: 22, opacity: phase === "listening" || phase === "processing" ? 0.5 : 1 }}
+          disabled={busy}
+          style={({ pressed }) => [
+            styles.footerBtn,
+            styles.footerPrimary,
+            busy && { opacity: 0.5 },
+            pressed && styles.pressed,
+          ]}
         >
-          <Play size={20} color="white" />
-          <Text className="text-white font-display">Weiter</Text>
-        </TouchableOpacity>
+          <Ionicons name="play" size={18} color="white" />
+          <Text style={styles.footerPrimaryText}>Weiter</Text>
+        </Pressable>
       </View>
     </SafeAreaView>
   );
@@ -250,19 +238,124 @@ export default function PlayScreen() {
 
 function ScoreBar({ total }: { total: number }) {
   const t = Math.round(total);
-  const color = t >= 75 ? "bg-good-500" : t >= 50 ? "bg-mid-500" : "bg-bad-500";
+  const color = t >= 75 ? "#22c55e" : t >= 50 ? "#f59e0b" : "#ef4444";
   const label = t >= 75 ? "🌟 Sehr gut!" : t >= 50 ? "🙂 Fast!" : "💪 Nochmal!";
   return (
-    <View className="w-full mt-4">
-      <View className="h-3 bg-ink-300/40 rounded-full overflow-hidden">
-        <MotiView
-          className={`h-full ${color}`}
-          from={{ width: "0%" }}
-          animate={{ width: `${t}%` }}
-          transition={{ type: "timing", duration: 500 }}
-        />
+    <View style={{ width: "100%", marginTop: 12 }}>
+      <View style={{ height: 10, backgroundColor: "#e2e8f0", borderRadius: 5, overflow: "hidden" }}>
+        <View style={{ width: `${t}%`, height: "100%", backgroundColor: color }} />
       </View>
-      <Text className="text-center font-display text-lg mt-2">{label} {t} / 100</Text>
+      <Text style={{ textAlign: "center", fontSize: 16, fontWeight: "700", marginTop: 6 }}>
+        {label} {t} / 100
+      </Text>
     </View>
   );
 }
+
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: "#f8fafc" },
+  center: { alignItems: "center", justifyContent: "center", padding: 24 },
+  title: { fontSize: 20, fontWeight: "700", color: "#0f172a", textAlign: "center" },
+  subMuted: { color: "#64748b", textAlign: "center", marginTop: 6 },
+  pressed: { opacity: 0.75, transform: [{ scale: 0.98 }] },
+  primaryBtn: {
+    marginTop: 12,
+    backgroundColor: "#3b82f6",
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 22,
+  },
+  primaryBtnText: { color: "white", fontWeight: "700" },
+  header: {
+    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+    paddingHorizontal: 12, paddingVertical: 8,
+  },
+  iconBtn: {
+    width: 40, height: 40, borderRadius: 20, backgroundColor: "white",
+    alignItems: "center", justifyContent: "center",
+    borderWidth: 1, borderColor: "#e2e8f0",
+  },
+  headerCenter: { flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1 },
+  headerEmoji: { fontSize: 22 },
+  headerTitle: { fontSize: 17, fontWeight: "700", color: "#0f172a", flexShrink: 1 },
+  progressBg: {
+    height: 8, marginHorizontal: 20, backgroundColor: "#e2e8f0",
+    borderRadius: 4, overflow: "hidden",
+  },
+  progressFill: { height: "100%", backgroundColor: "#3b82f6" },
+  progressText: { textAlign: "center", color: "#64748b", fontSize: 12, marginTop: 4 },
+  scroll: { flex: 1 },
+  scrollContent: {
+    flexGrow: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 24,
+  },
+  wordCard: {
+    width: "100%",
+    backgroundColor: "white",
+    borderRadius: 20,
+    paddingVertical: 24,
+    paddingHorizontal: 16,
+    alignItems: "center",
+    shadowColor: "#0f172a",
+    shadowOpacity: 0.06,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 2,
+  },
+  arabic: { fontSize: 72, lineHeight: 96, color: "#0f172a", writingDirection: "rtl", textAlign: "center" },
+  arabicSmall: { fontSize: 20, color: "#0f172a", writingDirection: "rtl" },
+  de: { color: "#334155", fontSize: 18, marginTop: 6, fontWeight: "600" },
+  translit: { color: "#94a3b8", fontStyle: "italic", fontSize: 14, marginTop: 2 },
+  phaseWrap: { marginTop: 24, alignItems: "center", minHeight: 120, justifyContent: "center" },
+  phaseRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+  phaseText: { color: "#2563eb", fontSize: 17 },
+  resultCard: {
+    marginTop: 20,
+    width: "100%",
+    alignItems: "center",
+    position: "relative",
+    backgroundColor: "white",
+    borderRadius: 20,
+    paddingVertical: 18,
+    paddingHorizontal: 16,
+    shadowColor: "#0f172a",
+    shadowOpacity: 0.06,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 2,
+  },
+  footer: {
+    flexDirection: "row",
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    gap: 12,
+    backgroundColor: "white",
+    borderTopWidth: 1,
+    borderTopColor: "#e2e8f0",
+    shadowColor: "#0f172a",
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: -2 },
+    elevation: 8,
+  },
+  footerBtn: {
+    flex: 1,
+    minHeight: 52,
+    paddingVertical: 14,
+    borderRadius: 26,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
+  footerSecondary: {
+    backgroundColor: "#f1f5f9", borderWidth: 1, borderColor: "#e2e8f0",
+  },
+  footerSecondaryText: { color: "#334155", fontWeight: "700", fontSize: 16 },
+  footerPrimary: { backgroundColor: "#22c55e" },
+  footerPrimaryText: { color: "white", fontWeight: "700", fontSize: 16 },
+});

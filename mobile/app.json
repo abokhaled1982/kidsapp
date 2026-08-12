@@ -1,50 +1,53 @@
 {
   "expo": {
-    "name": "Kids Arabisch",
-    "slug": "kidsapp-arabisch",
-    "version": "0.1.0",
+    "name": "KidsApp",
+    "slug": "kidsapp",
+    "version": "1.0.0",
     "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
     "scheme": "kidsapp",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
-    "splash": {
-      "resizeMode": "contain",
-      "backgroundColor": "#0ea5e9"
-    },
-    "assetBundlePatterns": [
-      "**/*"
-    ],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.abokhaled.kidsapp",
       "infoPlist": {
-        "NSMicrophoneUsageDescription": "Wir brauchen dein Mikrofon, damit du Wörter aussprechen kannst.",
-        "ITSAppUsesNonExemptEncryption": false
+        "NSMicrophoneUsageDescription": "Zum Aufnehmen deiner arabischen Aussprache."
       }
     },
     "android": {
       "package": "com.abokhaled.kidsapp",
+      "permissions": ["android.permission.RECORD_AUDIO"],
       "adaptiveIcon": {
-        "backgroundColor": "#0ea5e9"
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "backgroundImage": "./assets/images/android-icon-background.png",
+        "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
-      "permissions": [
-        "android.permission.RECORD_AUDIO"
-      ]
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false
     },
     "web": {
-      "bundler": "metro",
-      "output": "static"
+      "output": "static",
+      "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
       "expo-router",
-      "expo-font",
       [
         "expo-audio",
         {
-          "microphonePermission": "Wir brauchen dein Mikrofon, damit du Wörter aussprechen kannst."
+          "microphonePermission": "Zum Aufnehmen deiner arabischen Aussprache."
         }
       ],
-      "expo-sqlite"
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#ffffff"
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

@@ -1,59 +1,66 @@
-import { View, Text, ScrollView } from "react-native";
+import { View, Text, StyleSheet, ScrollView } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { Star, Flame, Trophy } from "lucide-react-native";
-import { MotiView } from "moti";
 import { useProgress, level, xpForNextLevel } from "@/store/useProgress";
 
 export default function RewardsScreen() {
   const xp = useProgress((s) => s.xp);
   const stars = useProgress((s) => s.stars);
   const streak = useProgress((s) => s.streakDays);
+  const mastered = useProgress((s) => s.wordsMastered);
   const lv = level(xp);
-  const next = xpForNextLevel(xp);
-  const prev = Math.pow(lv - 1, 2) * 25;
-  const pct = Math.min(1, Math.max(0, (xp - prev) / (next - prev || 1)));
+  const nextXp = xpForNextLevel(xp);
+  const wordsCount = Object.keys(mastered).length;
 
   return (
-    <SafeAreaView className="flex-1 bg-paper-50" edges={["top"]}>
-      <ScrollView contentContainerStyle={{ padding: 20, gap: 16 }}>
-        <Text className="font-display text-2xl text-ink-900">Belohnungen</Text>
+    <SafeAreaView style={styles.root} edges={["top"]}>
+      <ScrollView contentContainerStyle={styles.scroll}>
+        <Text style={styles.title}>Meine Sterne</Text>
 
-        <MotiView
-          from={{ opacity: 0, translateY: 12 }}
-          animate={{ opacity: 1, translateY: 0 }}
-          transition={{ type: "spring", damping: 14 }}
-          className="rounded-xl2 p-5 bg-brand-500"
-          style={{ borderRadius: 22 }}
-        >
-          <Text className="text-white/80 font-body">Level</Text>
-          <Text className="text-white font-display text-5xl mt-1">Lvl {lv}</Text>
-          <View className="h-3 bg-white/20 rounded-full mt-4 overflow-hidden">
-            <View className="h-full bg-white" style={{ width: `${pct * 100}%` }} />
+        <View style={styles.card}>
+          <Text style={styles.big}>{stars} ⭐</Text>
+          <Text style={styles.label}>Gesamt Sterne</Text>
+        </View>
+
+        <View style={styles.row}>
+          <Stat value={`Lvl ${lv}`} label="Level" />
+          <Stat value={xp} label="XP" />
+          <Stat value={`${streak}🔥`} label="Streak" />
+        </View>
+
+        <View style={styles.card}>
+          <Text style={styles.small}>Nächstes Level bei {nextXp} XP</Text>
+          <View style={styles.barBg}>
+            <View style={[styles.barFill, { width: `${Math.min(100, (xp / nextXp) * 100)}%` }]} />
           </View>
-          <Text className="text-white/80 font-body text-xs mt-2">
-            {xp} / {next} XP bis Lvl {lv + 1}
-          </Text>
-        </MotiView>
+        </View>
 
-        <View className="flex-row gap-3">
-          <Card icon={<Star size={28} color="#f59e0b" fill="#fbbf24" />} label="Sterne" value={stars} />
-          <Card icon={<Flame size={28} color="#dc2626" />} label="Streak" value={`${streak}d`} />
-          <Card icon={<Trophy size={28} color="#2563eb" />} label="XP" value={xp} />
+        <View style={styles.card}>
+          <Text style={styles.small}>Gelernte Wörter</Text>
+          <Text style={styles.big}>{wordsCount}</Text>
         </View>
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-function Card({ icon, label, value }: { icon: React.ReactNode; label: string; value: number | string }) {
+function Stat({ value, label }: { value: string | number; label: string }) {
   return (
-    <View
-      className="flex-1 rounded-xl2 p-4 bg-white border border-ink-300/40 items-center"
-      style={{ borderRadius: 22 }}
-    >
-      {icon}
-      <Text className="font-display text-xl text-ink-900 mt-2">{value}</Text>
-      <Text className="font-body text-xs text-ink-500 mt-0.5">{label}</Text>
+    <View style={[styles.card, { flex: 1, alignItems: "center" }]}>
+      <Text style={styles.big}>{value}</Text>
+      <Text style={styles.label}>{label}</Text>
     </View>
   );
 }
+
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: "#f8fafc" },
+  scroll: { padding: 20, gap: 12 },
+  title: { fontSize: 22, fontWeight: "700", color: "#0f172a", marginBottom: 6 },
+  card: { backgroundColor: "white", padding: 16, borderRadius: 18, gap: 4 },
+  row: { flexDirection: "row", gap: 12 },
+  big: { fontSize: 28, fontWeight: "800", color: "#0f172a" },
+  small: { fontSize: 13, color: "#64748b" },
+  label: { fontSize: 12, color: "#64748b" },
+  barBg: { height: 8, borderRadius: 4, backgroundColor: "#e2e8f0", marginTop: 8, overflow: "hidden" },
+  barFill: { height: "100%", backgroundColor: "#3b82f6" },
+});

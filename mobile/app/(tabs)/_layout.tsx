@@ -1,32 +1,44 @@
 import { Tabs } from "expo-router";
-import { Mic, BookOpen, Gamepad2, Trophy } from "lucide-react-native";
+import { Ionicons } from "@expo/vector-icons";
 
 export default function TabsLayout() {
   return (
     <Tabs
       screenOptions={{
         headerShown: false,
-        tabBarActiveTintColor: "#2563eb",
-        tabBarInactiveTintColor: "#64748b",
-        tabBarLabelStyle: { fontWeight: "700", fontSize: 12 },
-        tabBarStyle: { height: 68, paddingBottom: 12, paddingTop: 8 },
+        tabBarActiveTintColor: "#3b82f6",
+        tabBarInactiveTintColor: "#94a3b8",
+        tabBarStyle: { backgroundColor: "#ffffff", borderTopColor: "#e2e8f0" },
+        tabBarLabelStyle: { fontSize: 12, fontWeight: "600" },
       }}
     >
       <Tabs.Screen
         name="index"
-        options={{ title: "Aussprache", tabBarIcon: ({ color, size }) => <Mic color={color} size={size} /> }}
+        options={{
+          title: "Aussprache",
+          tabBarIcon: ({ color, size }) => <Ionicons name="mic" color={color} size={size} />,
+        }}
       />
       <Tabs.Screen
         name="quran"
-        options={{ title: "Qur'an", tabBarIcon: ({ color, size }) => <BookOpen color={color} size={size} /> }}
+        options={{
+          title: "Qurʾān",
+          tabBarIcon: ({ color, size }) => <Ionicons name="book" color={color} size={size} />,
+        }}
       />
       <Tabs.Screen
         name="games"
-        options={{ title: "Spiele", tabBarIcon: ({ color, size }) => <Gamepad2 color={color} size={size} /> }}
+        options={{
+          title: "Spiele",
+          tabBarIcon: ({ color, size }) => <Ionicons name="game-controller" color={color} size={size} />,
+        }}
       />
       <Tabs.Screen
         name="rewards"
-        options={{ title: "Belohnungen", tabBarIcon: ({ color, size }) => <Trophy color={color} size={size} /> }}
+        options={{
+          title: "Sterne",
+          tabBarIcon: ({ color, size }) => <Ionicons name="star" color={color} size={size} />,
+        }}
       />
     </Tabs>
   );
