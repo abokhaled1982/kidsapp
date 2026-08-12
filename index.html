@@ -260,11 +260,11 @@ const STATE_KEY = "arabicApp.v1";
 let state = { idx: 0, apiUrl: "" };
 try { state = { ...state, ...JSON.parse(localStorage.getItem(STATE_KEY) || "{}") }; } catch {}
 
-const MAX_RECORD_MS   = 3500;   // Sicherheitsnetz
+const MAX_RECORD_MS   = 4000;   // Sicherheitsnetz: absolute Obergrenze
+const MIN_TOTAL_MS    = 900;    // Aufnahme nie kuerzer als das (auch bei sehr kurzen Woertern)
 const START_RMS       = 0.02;   // ab hier gilt es als Sprache begonnen
 const SILENCE_RMS     = 0.012;  // darunter gilt es als Stille
-const SILENCE_END_MS  = 600;    // so lange Stille nach Sprache = fertig
-const MIN_SPEECH_MS   = 250;    // Aufnahme nicht kuerzer als das stoppen
+const SILENCE_END_MS  = 750;    // so lange Stille nach Sprache = fertig
 let mediaRecorder = null, chunks = [], recording = false, recStopTimer = null;
 let audioCtx = null, analyser = null, rafId = null;
 
@@ -352,7 +352,7 @@ async function startRecording() {
     if (speechStarted) {
       if (rms < SILENCE_RMS) {
         if (silenceStart === null) silenceStart = performance.now();
-        if (performance.now() - silenceStart >= SILENCE_END_MS && elapsed >= MIN_SPEECH_MS) {
+        if (performance.now() - silenceStart >= SILENCE_END_MS && elapsed >= MIN_TOTAL_MS) {
           stopRecording();
           return;
         }
