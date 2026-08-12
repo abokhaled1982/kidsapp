@@ -21,3 +21,6 @@ pretrained_models/
 
 # Logs
 *.log
+
+#node_modules
+mobile/node_modules/*

@@ -1,0 +1,53 @@
+{
+  "expo": {
+    "name": "Kids Arabisch",
+    "slug": "kidsapp-arabisch",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "kidsapp",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#0ea5e9"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.abokhaled.kidsapp",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Wir brauchen dein Mikrofon, damit du Wörter aussprechen kannst.",
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "com.abokhaled.kidsapp",
+      "adaptiveIcon": {
+        "backgroundColor": "#0ea5e9"
+      },
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
+      ]
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-font",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Wir brauchen dein Mikrofon, damit du Wörter aussprechen kannst."
+        }
+      ],
+      "expo-sqlite"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
