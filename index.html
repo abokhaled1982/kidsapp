@@ -260,8 +260,13 @@ const STATE_KEY = "arabicApp.v1";
 let state = { idx: 0, apiUrl: "" };
 try { state = { ...state, ...JSON.parse(localStorage.getItem(STATE_KEY) || "{}") }; } catch {}
 
-const MAX_RECORD_MS = 3500;
+const MAX_RECORD_MS   = 3500;   // Sicherheitsnetz
+const START_RMS       = 0.02;   // ab hier gilt es als Sprache begonnen
+const SILENCE_RMS     = 0.012;  // darunter gilt es als Stille
+const SILENCE_END_MS  = 600;    // so lange Stille nach Sprache = fertig
+const MIN_SPEECH_MS   = 250;    // Aufnahme nicht kuerzer als das stoppen
 let mediaRecorder = null, chunks = [], recording = false, recStopTimer = null;
+let audioCtx = null, analyser = null, rafId = null;
 
 apiInput.value = state.apiUrl;
 apiInput.addEventListener("change", () => {
@@ -319,6 +324,46 @@ async function startRecording() {
   micBtn.classList.add("recording");
   micBtn.textContent = "⏹ Stopp";
   setStatus("🔴 Aufnahme läuft… sprich jetzt das Wort.");
+
+  // RMS-basierte End-of-Speech-Erkennung parallel zur Aufnahme.
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const src = audioCtx.createMediaStreamSource(stream);
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 1024;
+  src.connect(analyser);
+  const buf = new Float32Array(analyser.fftSize);
+
+  const t0 = performance.now();
+  let speechStarted = false;
+  let silenceStart  = null;
+
+  const tick = () => {
+    if (!recording) return;
+    analyser.getFloatTimeDomainData(buf);
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+    const rms = Math.sqrt(sum / buf.length);
+    const elapsed = performance.now() - t0;
+
+    if (!speechStarted && rms > START_RMS && elapsed > 100) {
+      speechStarted = true;
+      setStatus("🗣️ Sprache erkannt…");
+    }
+    if (speechStarted) {
+      if (rms < SILENCE_RMS) {
+        if (silenceStart === null) silenceStart = performance.now();
+        if (performance.now() - silenceStart >= SILENCE_END_MS && elapsed >= MIN_SPEECH_MS) {
+          stopRecording();
+          return;
+        }
+      } else {
+        silenceStart = null;
+      }
+    }
+    rafId = requestAnimationFrame(tick);
+  };
+  rafId = requestAnimationFrame(tick);
+
   recStopTimer = setTimeout(stopRecording, MAX_RECORD_MS);
 }
 
@@ -326,6 +371,8 @@ function stopRecording() {
   if (!recording) return;
   recording = false;
   clearTimeout(recStopTimer);
+  if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+  if (audioCtx) { try { audioCtx.close(); } catch {} audioCtx = null; analyser = null; }
   micBtn.classList.remove("recording");
   micBtn.textContent = "🎤 Vorlesen";
   micBtn.disabled = true;
