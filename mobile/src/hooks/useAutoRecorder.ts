@@ -2,9 +2,11 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import {
   useAudioRecorder,
   useAudioRecorderState,
-  RecordingPresets,
   setAudioModeAsync,
   requestRecordingPermissionsAsync,
+  AudioQuality,
+  IOSOutputFormat,
+  type RecordingOptions,
 } from "expo-audio";
 
 const MAX_RECORD_MS   = 3500;
@@ -12,6 +14,39 @@ const MIN_TOTAL_MS    = 600;
 const SILENCE_END_MS  = 380;
 const START_DB        = -35; // > als das gilt es als Sprache begonnen
 const SILENCE_DB      = -45; // < als das gilt es als Stille
+
+// ASR-optimierte Aufnahme:
+//  - 16 kHz mono = native wav2vec2-Rate: kein Resampling, halb so grosse Upload-Payload wie 44.1 kHz.
+//  - Android audioSource "voice_recognition": aktiviert Googles fuer ASR getunte NS/AGC-Kette
+//    (identisch zu Google Assistant / Speech-to-Text), ohne aggressive Echo-Cancellation, die
+//    arabische Gutturale (\u062d\u062e\u0639\u063a\u0642) verstuemmelt.
+//  - iOS LINEARPCM: verlustfreies WAV statt AAC \u2192 keine Codec-Artefakte auf Frikativen (\u062b/\u0633/\u0641).
+const ASR_RECORDING_OPTIONS: RecordingOptions = {
+  extension: ".m4a",
+  sampleRate: 16000,
+  numberOfChannels: 1,
+  bitRate: 128000,
+  android: {
+    extension: ".m4a",
+    outputFormat: "mpeg4",
+    audioEncoder: "aac",
+    audioSource: "voice_recognition",
+    sampleRate: 16000,
+  },
+  ios: {
+    extension: ".wav",
+    outputFormat: IOSOutputFormat.LINEARPCM,
+    audioQuality: AudioQuality.MAX,
+    sampleRate: 16000,
+    linearPCMBitDepth: 16,
+    linearPCMIsBigEndian: false,
+    linearPCMIsFloat: false,
+  },
+  web: {
+    mimeType: "audio/webm;codecs=opus",
+    bitsPerSecond: 128000,
+  },
+};
 
 export type RecorderStatus = "idle" | "recording" | "processing" | "done" | "error";
 
@@ -21,7 +56,7 @@ export type RecorderStatus = "idle" | "recording" | "processing" | "done" | "err
  */
 export function useAutoRecorder(onStop: (uri: string | null) => void) {
   const recorder = useAudioRecorder({
-    ...RecordingPresets.HIGH_QUALITY,
+    ...ASR_RECORDING_OPTIONS,
     isMeteringEnabled: true,
   });
   const state = useAudioRecorderState(recorder, 100);
@@ -61,7 +96,13 @@ export function useAutoRecorder(onStop: (uri: string | null) => void) {
     cleanup();
     const perm = await requestRecordingPermissionsAsync();
     if (!perm.granted) { setStatus("error"); onStop(null); return; }
-    await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+    // doNotMix: exklusiver Mic-Zugriff, verhindert das ein anderer Prozess das Signal daempft.
+    await setAudioModeAsync({
+      allowsRecording: true,
+      playsInSilentMode: true,
+      interruptionMode: "doNotMix",
+      shouldRouteThroughEarpiece: false,
+    });
     await recorder.prepareToRecordAsync();
     recorder.record();
     startedAtRef.current = Date.now();
