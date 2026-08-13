@@ -8,11 +8,12 @@ import { Ionicons } from "@expo/vector-icons";
 import { CATEGORIES, type CategoryId } from "@/data/categories";
 import { WORDS } from "@/data/words";
 import { speakArabic, stopSpeaking } from "@/lib/tts";
-import { assessAudio, type AssessResponse } from "@/lib/api";
+import { assessAudioSmart, type AssessResponse, type AssessMeta } from "@/lib/api";
 import { useAutoRecorder } from "@/hooks/useAutoRecorder";
 import { useBackend } from "@/store/useBackend";
 import { useProgress } from "@/store/useProgress";
 import { LetterFeedback } from "@/components/LetterFeedback";
+import { LatencyChip } from "@/components/LatencyChip";
 import { StarBurst } from "@/components/StarBurst";
 import { PulsingMic } from "@/components/PulsingMic";
 
@@ -22,6 +23,7 @@ export default function PlayScreen() {
   const { categoryId } = useLocalSearchParams<{ categoryId: CategoryId }>();
   const router = useRouter();
   const backendUrl = useBackend((s) => s.url);
+  const streaming  = useBackend((s) => s.streaming);
   const addResult = useProgress((s) => s.addResult);
 
   const category = useMemo(() => CATEGORIES.find((c) => c.id === categoryId), [categoryId]);
@@ -30,6 +32,7 @@ export default function PlayScreen() {
   const [idx, setIdx] = useState(0);
   const [phase, setPhase] = useState<Phase>("idle");
   const [result, setResult] = useState<AssessResponse | null>(null);
+  const [meta, setMeta] = useState<AssessMeta | null>(null);
   const [errMsg, setErrMsg] = useState<string | null>(null);
 
   const word = items[idx];
@@ -42,8 +45,10 @@ export default function PlayScreen() {
     }
     setPhase("processing");
     try {
-      const r = await assessAudio(backendUrl, uri, word.ar);
-      setResult(r);
+      const r = await assessAudioSmart(backendUrl, uri, word.ar, streaming);
+      const { _meta, ...clean } = r as any;
+      setResult(clean);
+      setMeta(_meta);
       setPhase("result");
       const key = `${categoryId}:${word.ar}`;
       addResult(key, r.total);
@@ -195,6 +200,7 @@ export default function PlayScreen() {
               Du hast gesagt: <Text style={styles.arabicSmall}>{result.transcription || "—"}</Text>
             </Text>
             <ScoreBar total={result.total} />
+            <LatencyChip meta={meta ?? undefined} serverMs={result.duration_ms} />
           </View>
         )}
       </ScrollView>

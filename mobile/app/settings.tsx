@@ -1,24 +1,57 @@
 import { useState } from "react";
-import { View, Text, TextInput, Pressable, KeyboardAvoidingView, Platform, StyleSheet } from "react-native";
+import { View, Text, TextInput, Pressable, KeyboardAvoidingView, Platform, Switch, StyleSheet, ScrollView } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useBackend } from "@/store/useBackend";
-import { pingHealth } from "@/lib/api";
+import { pingHealth, fetchHealth } from "@/lib/api";
+import { closeStreamSession, StreamSession } from "@/lib/stream";
 
 export default function SettingsScreen() {
   const router = useRouter();
   const savedUrl = useBackend((s) => s.url);
+  const streaming = useBackend((s) => s.streaming);
   const setUrl = useBackend((s) => s.setUrl);
+  const setStreaming = useBackend((s) => s.setStreaming);
   const [draft, setDraft] = useState(savedUrl);
   const [check, setCheck] = useState<"idle" | "checking" | "ok" | "fail">("idle");
+  const [diag, setDiag] = useState<string | null>(null);
 
   const save = async () => {
     setUrl(draft);
+    closeStreamSession();
     setCheck("checking");
     const ok = await pingHealth(draft);
     setCheck(ok ? "ok" : "fail");
     if (ok) setTimeout(() => router.back(), 700);
+  };
+
+  const runDiagnostic = async () => {
+    setDiag("Prüfe /health …");
+    const h = await fetchHealth(draft || savedUrl);
+    if (!h.ok) {
+      setDiag(`❌ Backend nicht erreichbar: ${h.error ?? "unbekannt"}`);
+      return;
+    }
+    let out = `✅ Backend online\n`;
+    out += `   Modell: ${h.model ?? "?"}\n`;
+    out += `   Device: ${h.device ?? "?"}\n`;
+    out += `   /stream-Endpoint: ${h.hasStream ? "✅ vorhanden" : "❌ FEHLT – Colab neu starten!"}\n`;
+
+    if (h.hasStream) {
+      setDiag(out + `\nTeste WebSocket …`);
+      const s = new StreamSession(draft || savedUrl);
+      const t0 = Date.now();
+      try {
+        await s.ensureConnected();
+        out += `\n✅ WebSocket verbunden in ${Date.now() - t0} ms`;
+      } catch (e: any) {
+        out += `\n❌ WebSocket-Fehler: ${e?.message ?? e}`;
+      } finally {
+        s.close();
+      }
+    }
+    setDiag(out);
   };
 
   const btnLabel =
@@ -56,6 +89,32 @@ export default function SettingsScreen() {
             <Ionicons name={check === "ok" ? "checkmark" : "cloud-upload"} size={22} color="white" />
             <Text style={styles.saveText}>{btnLabel}</Text>
           </Pressable>
+
+          <View style={styles.toggleCard}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.toggleTitle}>⚡ Streaming-Modus</Text>
+              <Text style={styles.toggleHint}>
+                Bewertung über eine persistente WebSocket-Verbindung. Spart ~500 ms pro Wort
+                gegenüber HTTP. Bei Verbindungsproblemen wird automatisch auf HTTP zurückgefallen.
+              </Text>
+            </View>
+            <Switch
+              value={streaming}
+              onValueChange={(v) => { setStreaming(v); closeStreamSession(); }}
+              trackColor={{ true: "#22c55e", false: "#cbd5e1" }}
+              thumbColor="#ffffff"
+            />
+          </View>
+
+          <Pressable onPress={runDiagnostic} style={styles.diagBtn}>
+            <Ionicons name="pulse" size={18} color="#334155" />
+            <Text style={styles.diagBtnText}>Backend & WebSocket testen</Text>
+          </Pressable>
+          {diag ? (
+            <ScrollView style={styles.diagBox} contentContainerStyle={{ padding: 12 }}>
+              <Text style={styles.diagText}>{diag}</Text>
+            </ScrollView>
+          ) : null}
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -101,4 +160,37 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   saveText: { color: "white", fontSize: 15, fontWeight: "700" },
+  toggleCard: {
+    marginTop: 20,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    backgroundColor: "white",
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    padding: 14,
+  },
+  toggleTitle: { color: "#0f172a", fontSize: 15, fontWeight: "700" },
+  toggleHint: { color: "#64748b", fontSize: 12, marginTop: 4, lineHeight: 16 },
+  diagBtn: {
+    marginTop: 16,
+    backgroundColor: "#f1f5f9",
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    borderRadius: 22,
+    paddingVertical: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
+  diagBtnText: { color: "#334155", fontSize: 14, fontWeight: "700" },
+  diagBox: {
+    marginTop: 8,
+    maxHeight: 200,
+    backgroundColor: "#0f172a",
+    borderRadius: 12,
+  },
+  diagText: { color: "#e2e8f0", fontSize: 12, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace" },
 });

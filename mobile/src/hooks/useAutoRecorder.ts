@@ -10,8 +10,8 @@ import {
 } from "expo-audio";
 
 const MAX_RECORD_MS   = 3500;
-const MIN_TOTAL_MS    = 600;
-const SILENCE_END_MS  = 380;
+const MIN_TOTAL_MS    = 500;
+const SILENCE_END_MS  = 220; // war 380 - VAD im Backend faengt Rest ab, Client kann strenger sein
 const START_DB        = -35; // > als das gilt es als Sprache begonnen
 const SILENCE_DB      = -45; // < als das gilt es als Stille
 
