@@ -71,7 +71,7 @@ export default function PlayScreen() {
       setTimeout(() => {
         setPhase("listening");
         rec.start();
-      }, 350);
+      }, 150);
     });
   };
 

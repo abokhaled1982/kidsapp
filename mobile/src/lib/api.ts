@@ -4,6 +4,8 @@ export type AssessUnit = {
   label: string;
   score: number;
   confidence: number;
+  llr?: number | null;
+  error_hint?: string | null;
 };
 
 export type AssessResponse = {
