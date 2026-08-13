@@ -1,137 +1,327 @@
-import type { AssessResponse } from "./api";
+// Persistente WebSocket-Session zum Backend.
+//
+// Zwei Aufgaben:
+//   A) assessWord(uri, target)   -> Promise<AssessResponse>
+//   B) assessAyah(uri, ayah, cb) -> Promise<AyahDoneEvent>
+//        cb liefert pro erkanntem Wort ein Progress-Event zurück, damit
+//        die UI die Wörter progressiv einfärben kann.
+//
+// Design-Entscheidungen (siehe /memories/repo/quran-app-websocket.md):
+//   - HTTPS wird zu WSS gemappt (Cloudflared Quick Tunnel).
+//   - Server-Keep-Alive alle 20s ("ping":true) wird stumm ignoriert.
+//   - Circuit-Breaker: nach 2 aufeinanderfolgenden Fehlern kein WS-Versuch
+//     für 20s -> Client fällt sofort in HTTP-Fallback (kein Multi-Sekunden-
+//     Stall bei Cloudflared-Ausfall).
+//   - warmUp() als fire-and-forget beim Screen-Mount, damit das erste Wort
+//     nicht die Connect-Latenz bezahlt.
 
-// Persistente WebSocket-Session zum FastAPI-Endpoint /stream.
-// Wiederverwendet eine Verbindung fuer viele Woerter -> eliminiert HTTPS/TLS-Overhead
-// pro Wort (~500ms Ersparnis bei Cloudflared-Free-Tunnel).
-export class StreamSession {
+import { readUriAsArrayBuffer } from "@/lib/audioBytes";
+import type { AssessResponse } from "@/lib/api";
+
+const CONNECT_TIMEOUT_MS  = 7000;
+const REQUEST_TIMEOUT_MS  = 15000;
+const AYAH_TIMEOUT_MS     = 25000;
+const CIRCUIT_TRIP_AT     = 2;
+const CIRCUIT_COOLDOWN_MS = 20000;
+
+// --- Ayah-Frame-Typen (spiegelt Backend-JSON) ---
+export type AyahStartEvent = {
+  kind: "start";
+  words_count: number;
+  transcription: string;
+};
+export type AyahWordEvent = {
+  kind: "word";
+  word_idx: number;
+  target: string;
+  score: number;
+  units: Array<{
+    label: string;
+    score: number;
+    confidence: number;
+    llr?: number | null;
+    error_hint?: string | null;
+  }>;
+};
+export type AyahDoneEvent = {
+  kind: "done";
+  total: number;
+  words_count: number;
+  duration_ms: number;
+};
+export type AyahProgress = AyahStartEvent | AyahWordEvent | AyahDoneEvent;
+
+function httpToWs(url: string): string {
+  if (!url) return url;
+  if (url.startsWith("wss://") || url.startsWith("ws://")) return url;
+  return url.replace(/^http:/, "ws:").replace(/^https:/, "wss:");
+}
+
+class StreamSession {
   private ws: WebSocket | null = null;
-  private connectPromise: Promise<void> | null = null;
-  private pending: {
-    resolve: (r: AssessResponse) => void;
-    reject: (e: Error) => void;
-  } | null = null;
+  private connecting: Promise<WebSocket> | null = null;
+  private queue: Promise<any> = Promise.resolve();
+  private failStreak = 0;
+  private circuitOpenUntil = 0;
 
   constructor(private backendUrl: string) {}
 
-  private wsUrl(): string {
-    const base = this.backendUrl.replace(/\/$/, "");
-    const scheme = base.startsWith("https") ? "wss" : "ws";
-    return base.replace(/^https?/, scheme) + "/stream";
+  /** Public convenience: baut die Verbindung auf und wartet auf OPEN. */
+  ensureConnected(): Promise<void> {
+    return this.connect().then(() => undefined);
   }
 
-  async ensureConnected(): Promise<void> {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
-    if (this.connectPromise) return this.connectPromise;
-    const url = this.wsUrl();
-    this.connectPromise = new Promise<void>((resolve, reject) => {
-      const ws = new WebSocket(url);
-      this.ws = ws;
-      // Cloudflared Cold-Start + WS-Upgrade kann laenger dauern als HTTPS.
-      const timeout = setTimeout(() => {
-        ws.close();
-        reject(new Error(`WebSocket-Timeout nach 12s zu ${url}`));
-      }, 12000);
+  /** Public alias fuer dispose() zur externen Nutzung. */
+  close(): void { this.dispose(); }
+  private isCircuitOpen(): boolean {
+    return Date.now() < this.circuitOpenUntil;
+  }
+
+  private tripCircuit() {
+    this.failStreak++;
+    if (this.failStreak >= CIRCUIT_TRIP_AT) {
+      this.circuitOpenUntil = Date.now() + CIRCUIT_COOLDOWN_MS;
+    }
+  }
+
+  private resetCircuit() {
+    this.failStreak = 0;
+    this.circuitOpenUntil = 0;
+  }
+
+  private closeSocket() {
+    if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
+      try { this.ws.close(); } catch {}
+    }
+    this.ws = null;
+    this.connecting = null;
+  }
+
+  private connect(): Promise<WebSocket> {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      return Promise.resolve(this.ws);
+    }
+    if (this.connecting) return this.connecting;
+
+    this.connecting = new Promise<WebSocket>((resolve, reject) => {
+      const url = `${httpToWs(this.backendUrl)}/stream`;
+      let ws: WebSocket;
+      try { ws = new WebSocket(url); }
+      catch (e: any) { return reject(new Error(`WS-Konstruktor: ${e?.message ?? e}`)); }
+
+      const to = setTimeout(() => {
+        try { ws.close(); } catch {}
+        reject(new Error("WS-Connect-Timeout"));
+      }, CONNECT_TIMEOUT_MS);
+
       ws.onopen = () => {
-        clearTimeout(timeout);
-        console.log("[WS] connected", url);
-        resolve();
+        clearTimeout(to);
+        this.ws = ws;
+        resolve(ws);
       };
-      ws.onerror = (e: any) => {
-        clearTimeout(timeout);
-        const msg = e?.message || "unbekannt";
-        console.warn("[WS] error", url, msg);
-        reject(new Error(`WebSocket-Verbindungsfehler: ${msg}`));
-      };
-      ws.onclose = (e: any) => {
+      ws.onerror = () => {
+        clearTimeout(to);
         this.ws = null;
-        this.connectPromise = null;
-        if (e?.code) console.log("[WS] closed code=", e.code, "reason=", e.reason);
-        if (this.pending) {
-          this.pending.reject(new Error(`Verbindung getrennt (code ${e?.code ?? "?"})`));
-          this.pending = null;
-        }
+        reject(new Error("WS-Error beim Connect"));
       };
-      ws.onmessage = (ev) => {
-        // Keep-Alive-Pings vom Server ignorieren (halten Cloudflared-Tunnel offen).
-        let data: any;
-        try { data = JSON.parse(String(ev.data)); }
-        catch { return; }
-        if (data?.ping) return;
-        if (!this.pending) return;
-        const p = this.pending;
-        this.pending = null;
-        if (data.error) p.reject(new Error(data.error));
-        else p.resolve(data as AssessResponse);
+      ws.onclose = () => {
+        // Session-lokaler Handler: bei laufender Anfrage muss der jeweilige
+        // Request-Wrapper das mitkriegen -> per Fehler-Reject bei nächstem Send.
+        if (this.ws === ws) this.ws = null;
+        this.connecting = null;
       };
     });
-    try { await this.connectPromise; }
-    finally { this.connectPromise = null; }
+    return this.connecting;
   }
 
-  async assess(audioUri: string, target: string): Promise<AssessResponse> {
-    // Bis zu 2 Versuche: einmal mit ggf. schon offener WS, einmal frisch verbunden.
-    let lastErr: any = null;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        await this.ensureConnected();
-        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-          throw new Error("WS nicht offen");
-        }
-        if (this.pending) throw new Error("Vorherige Bewertung noch aktiv");
+  warmUp(): void {
+    if (this.isCircuitOpen()) return;
+    this.connect().catch(() => { /* still */ });
+  }
 
-        const blob = await (await fetch(audioUri)).blob();
-        const buffer = await blob.arrayBuffer();
+  /** Serialisiert Aufrufe, damit Wort/Ayah-Requests sich nicht überlappen. */
+  private enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.queue.then(fn, fn);
+    this.queue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
 
-        return await new Promise<AssessResponse>((resolve, reject) => {
-          this.pending = { resolve, reject };
+  assessWord(uri: string, target: string): Promise<AssessResponse> {
+    if (this.isCircuitOpen()) return Promise.reject(new Error("WS-Circuit offen"));
+
+    return this.enqueue(async () => {
+      const ws = await this.connect();
+      const bytes = await readUriAsArrayBuffer(uri);
+
+      return await new Promise<AssessResponse>((resolve, reject) => {
+        const to = setTimeout(() => {
+          this.tripCircuit();
+          this.closeSocket();
+          reject(new Error("WS-Request-Timeout"));
+        }, REQUEST_TIMEOUT_MS);
+
+        const onMsg = (ev: MessageEvent) => {
           try {
-            this.ws!.send(JSON.stringify({ target }));
-            this.ws!.send(buffer);
-          } catch (e: any) {
-            this.pending = null;
-            reject(new Error(e?.message ?? "Sendefehler"));
-            return;
-          }
-          setTimeout(() => {
-            if (this.pending?.resolve === resolve) {
-              this.pending = null;
-              reject(new Error("Server-Timeout (30s)"));
+            const data = JSON.parse(String(ev.data));
+            if (data?.ping) return;                 // keep-alive -> ignore
+            if (data?.error) {
+              cleanup();
+              this.tripCircuit();
+              reject(new Error(String(data.error)));
+              return;
             }
-          }, 30000);
-        });
-      } catch (e: any) {
-        lastErr = e;
-        console.warn(`[WS] assess attempt ${attempt + 1} failed:`, e?.message);
-        // Session komplett schliessen, damit ensureConnected() beim naechsten Versuch neu aufbaut.
-        this.close();
-      }
-    }
-    throw lastErr ?? new Error("Unbekannter WS-Fehler");
+            cleanup();
+            this.resetCircuit();
+            resolve(data as AssessResponse);
+          } catch (e: any) {
+            cleanup();
+            this.tripCircuit();
+            reject(new Error(`JSON-Parse: ${e?.message ?? e}`));
+          }
+        };
+        const onErr = () => {
+          cleanup();
+          this.tripCircuit();
+          this.closeSocket();
+          reject(new Error("WS-Error während Request"));
+        };
+        const onClose = () => {
+          cleanup();
+          this.tripCircuit();
+          reject(new Error("WS-Close während Request"));
+        };
+        const cleanup = () => {
+          clearTimeout(to);
+          ws.removeEventListener("message", onMsg as any);
+          ws.removeEventListener("error", onErr as any);
+          ws.removeEventListener("close", onClose as any);
+        };
+
+        ws.addEventListener("message", onMsg as any);
+        ws.addEventListener("error", onErr as any);
+        ws.addEventListener("close", onClose as any);
+
+        try {
+          ws.send(JSON.stringify({ target }));
+          ws.send(bytes);
+        } catch (e: any) {
+          cleanup();
+          this.tripCircuit();
+          this.closeSocket();
+          reject(new Error(`WS-Send-Fehler: ${e?.message ?? e}`));
+        }
+      });
+    });
   }
 
-  close() {
-    this.ws?.close();
-    this.ws = null;
-    this.connectPromise = null;
-    this.pending = null;
+  /**
+   * Sendet die ganze Ayah-Audio und ruft `onProgress` für JEDES eingehende
+   * Server-Frame (start / word / done). Aufloest mit dem Done-Event; Fehler
+   * -> reject, Client fällt in HTTP-Wort-Fallback zurück (via api.assessAudioHttp).
+   */
+  assessAyah(
+    uri: string,
+    ayahText: string,
+    onProgress: (ev: AyahProgress) => void,
+  ): Promise<AyahDoneEvent> {
+    if (this.isCircuitOpen()) return Promise.reject(new Error("WS-Circuit offen"));
+
+    return this.enqueue(async () => {
+      const ws = await this.connect();
+      const bytes = await readUriAsArrayBuffer(uri);
+
+      return await new Promise<AyahDoneEvent>((resolve, reject) => {
+        const to = setTimeout(() => {
+          this.tripCircuit();
+          this.closeSocket();
+          reject(new Error("WS-Ayah-Timeout"));
+        }, AYAH_TIMEOUT_MS);
+
+        const onMsg = (ev: MessageEvent) => {
+          try {
+            const data = JSON.parse(String(ev.data));
+            if (data?.ping) return;
+            if (data?.error) {
+              cleanup();
+              this.tripCircuit();
+              reject(new Error(String(data.error)));
+              return;
+            }
+            if (data?.kind === "start" || data?.kind === "word") {
+              onProgress(data as AyahProgress);
+              return;
+            }
+            if (data?.kind === "done") {
+              onProgress(data as AyahProgress);
+              cleanup();
+              this.resetCircuit();
+              resolve(data as AyahDoneEvent);
+              return;
+            }
+          } catch (e: any) {
+            cleanup();
+            this.tripCircuit();
+            reject(new Error(`JSON-Parse: ${e?.message ?? e}`));
+          }
+        };
+        const onErr = () => {
+          cleanup();
+          this.tripCircuit();
+          this.closeSocket();
+          reject(new Error("WS-Error während Ayah-Request"));
+        };
+        const onClose = () => {
+          cleanup();
+          this.tripCircuit();
+          reject(new Error("WS-Close während Ayah-Request"));
+        };
+        const cleanup = () => {
+          clearTimeout(to);
+          ws.removeEventListener("message", onMsg as any);
+          ws.removeEventListener("error", onErr as any);
+          ws.removeEventListener("close", onClose as any);
+        };
+
+        ws.addEventListener("message", onMsg as any);
+        ws.addEventListener("error", onErr as any);
+        ws.addEventListener("close", onClose as any);
+
+        try {
+          ws.send(JSON.stringify({ mode: "ayah", ayah: ayahText }));
+          ws.send(bytes);
+        } catch (e: any) {
+          cleanup();
+          this.tripCircuit();
+          this.closeSocket();
+          reject(new Error(`WS-Send-Fehler: ${e?.message ?? e}`));
+        }
+      });
+    });
+  }
+
+  dispose() {
+    this.closeSocket();
   }
 }
 
-// Modul-Singleton: eine offene Session pro Backend-URL.
-// Wird bei URL-Wechsel automatisch neu aufgebaut.
-let _session: StreamSession | null = null;
-let _lastUrl = "";
+// Singleton-Cache pro Backend-URL. Wechsel der URL => alte Session schliessen.
+let cached: { url: string; session: StreamSession } | null = null;
 
 export function getStreamSession(backendUrl: string): StreamSession {
-  if (_session && _lastUrl === backendUrl) return _session;
-  _session?.close();
-  _session = new StreamSession(backendUrl);
-  _lastUrl = backendUrl;
-  return _session;
+  if (!cached || cached.url !== backendUrl) {
+    cached?.session.dispose();
+    cached = { url: backendUrl, session: new StreamSession(backendUrl) };
+  }
+  return cached.session;
 }
 
-export function closeStreamSession() {
-  _session?.close();
-  _session = null;
-  _lastUrl = "";
+/** Schliesst und verwirft die Singleton-Session (z.B. bei URL-Wechsel im Settings). */
+export function closeStreamSession(): void {
+  cached?.session.dispose();
+  cached = null;
 }
+
+export { StreamSession };

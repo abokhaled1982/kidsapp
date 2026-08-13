@@ -1,5 +1,9 @@
-import { Platform } from "react-native";
+// HTTP-Endpoint + geteilte Typen. Wird vom Play-Modus (Einzelwörter) direkt
+// und vom Quran-Modus als Fallback verwendet, wenn die WS-Session nicht steht.
 
+import { getStreamSession } from "@/lib/stream";
+import { readUriAsArrayBuffer } from "@/lib/audioBytes";
+export { readUriAsArrayBuffer };
 export type AssessUnit = {
   label: string;
   score: number;
@@ -16,99 +20,118 @@ export type AssessResponse = {
   duration_ms: number;
 };
 
-function inferFilename(uri: string): { name: string; type: string } {
-  const clean = uri.split("?")[0].split("#")[0];
-  const lower = clean.toLowerCase();
-  if (lower.endsWith(".m4a") || lower.endsWith(".mp4")) return { name: "rec.m4a", type: "audio/m4a" };
-  if (lower.endsWith(".webm")) return { name: "rec.webm", type: "audio/webm" };
-  if (lower.endsWith(".wav"))  return { name: "rec.wav",  type: "audio/wav" };
-  if (lower.endsWith(".ogg"))  return { name: "rec.ogg",  type: "audio/ogg" };
-  return { name: "rec.m4a", type: "audio/m4a" };
-}
-
-export async function assessAudio(
-  backendUrl: string,
-  audioUri: string,
-  target: string,
-): Promise<AssessResponse> {
-  const url = backendUrl.replace(/\/$/, "") + "/assess";
-  const form = new FormData();
-  const meta = inferFilename(audioUri);
-
-  if (Platform.OS === "web") {
-    // Browser: URI in Blob laden und als echte Datei anhängen.
-    const blob = await (await fetch(audioUri)).blob();
-    form.append("audio", new File([blob], meta.name, { type: meta.type }));
-  } else {
-    // React Native: fetch versteht {uri, name, type} nativ.
-    form.append("audio", { uri: audioUri, name: meta.name, type: meta.type } as any);
-  }
-  form.append("target", target);
-
-  const res = await fetch(url, { method: "POST", body: form });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status} ${text.slice(0, 200)}`);
-  }
-  return res.json();
-}
-
-export async function pingHealth(backendUrl: string): Promise<boolean> {
-  try {
-    const url = backendUrl.replace(/\/$/, "") + "/health";
-    const res = await fetch(url, { method: "GET" });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-export type HealthReport = {
-  ok: boolean;
-  hasStream: boolean;
-  model?: string;
-  device?: string;
-  raw?: any;
-  error?: string;
+export type AssessMeta = {
+  mode: "http" | "ws" | "http-fallback";
+  totalMs: number;
 };
 
-export async function fetchHealth(backendUrl: string): Promise<HealthReport> {
+const HTTP_TIMEOUT_MS = 15000;
+
+function inferFilename(uri: string): string {
+  const ext = uri.split(".").pop()?.toLowerCase() ?? "m4a";
+  return `rec.${ext}`;
+}
+
+function inferMime(uri: string): string {
+  const ext = uri.split(".").pop()?.toLowerCase();
+  if (ext === "wav") return "audio/wav";
+  if (ext === "webm") return "audio/webm";
+  if (ext === "mp3") return "audio/mpeg";
+  return "audio/mp4";
+}
+
+/** HTTP-Fallback: klassisches multipart/form-data POST /assess. */
+export async function assessAudioHttp(
+  backendUrl: string,
+  uri: string,
+  target: string,
+): Promise<AssessResponse & { _meta: AssessMeta }> {
+  if (!backendUrl) throw new Error("Backend-URL fehlt.");
+  const t0 = Date.now();
+  const form = new FormData();
+  // React Native FormData akzeptiert das {uri,name,type}-Format
+  form.append("audio", { uri, name: inferFilename(uri), type: inferMime(uri) } as any);
+  form.append("target", target);
+
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), HTTP_TIMEOUT_MS);
   try {
-    const url = backendUrl.replace(/\/$/, "") + "/health";
-    const res = await fetch(url, { method: "GET" });
-    if (!res.ok) return { ok: false, hasStream: false, error: `HTTP ${res.status}` };
-    const raw = await res.json();
-    const eps: string[] = Array.isArray(raw?.endpoints) ? raw.endpoints : [];
-    const hasStream = eps.some((e) => String(e).toLowerCase().includes("stream"));
-    return { ok: true, hasStream, model: raw?.asr_model, device: raw?.device, raw };
-  } catch (e: any) {
-    return { ok: false, hasStream: false, error: e?.message ?? "Netzwerkfehler" };
+    const res = await fetch(`${backendUrl}/assess`, {
+      method: "POST",
+      body: form as any,
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      throw new Error(`HTTP ${res.status}: ${txt || res.statusText}`);
+    }
+    const data = (await res.json()) as AssessResponse;
+    return { ...data, _meta: { mode: "http", totalMs: Date.now() - t0 } };
+  } finally {
+    clearTimeout(to);
   }
 }
 
-// Waehlt je nach Nutzer-Einstellung HTTP-POST oder persistente WebSocket-Session.
-// Streaming spart pro Wort ~500ms (kein TLS/Cloudflared-Reconnect), bei identischer
-// Bewertungsqualitaet (Backend ruft dieselbe _score_word-Pipeline auf).
-import { getStreamSession } from "./stream";
-
-export type AssessMeta = { mode: "ws" | "http" | "http-fallback"; totalMs: number };
-
+/**
+ * Smart-Assess: bevorzugt die persistente WS-Session (niedrige Latenz),
+ * fällt bei Fehler transparent auf HTTP zurück.
+ */
 export async function assessAudioSmart(
   backendUrl: string,
-  audioUri: string,
+  uri: string,
   target: string,
-  streaming: boolean,
+  useStreaming: boolean,
 ): Promise<AssessResponse & { _meta: AssessMeta }> {
   const t0 = Date.now();
-  if (streaming) {
+  if (useStreaming) {
+    const session = getStreamSession(backendUrl);
     try {
-      const r = await getStreamSession(backendUrl).assess(audioUri, target);
+      const r = await session.assessWord(uri, target);
       return { ...r, _meta: { mode: "ws", totalMs: Date.now() - t0 } };
     } catch {
-      const r = await assessAudio(backendUrl, audioUri, target);
+      // stiller Fallback
+      const r = await assessAudioHttp(backendUrl, uri, target);
       return { ...r, _meta: { mode: "http-fallback", totalMs: Date.now() - t0 } };
     }
   }
-  const r = await assessAudio(backendUrl, audioUri, target);
-  return { ...r, _meta: { mode: "http", totalMs: Date.now() - t0 } };
+  const r = await assessAudioHttp(backendUrl, uri, target);
+  return r;
+}
+
+// --------------------------------------------------------------------------
+// Health / Diagnose (fuer Settings-Screen)
+// --------------------------------------------------------------------------
+
+export type HealthInfo = {
+  ok: boolean;
+  model?: string;
+  device?: string;
+  hasStream: boolean;
+  error?: string;
+};
+
+export async function pingHealth(url: string): Promise<boolean> {
+  return (await fetchHealth(url)).ok;
+}
+
+export async function fetchHealth(url: string): Promise<HealthInfo> {
+  if (!url) return { ok: false, hasStream: false, error: "keine URL" };
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), 6000);
+  try {
+    const res = await fetch(`${url}/health`, { signal: ctrl.signal });
+    if (!res.ok) return { ok: false, hasStream: false, error: `HTTP ${res.status}` };
+    const j = await res.json();
+    const endpoints: string[] = Array.isArray(j.endpoints) ? j.endpoints : [];
+    return {
+      ok: true,
+      model: j.asr_model ?? j.model,
+      device: j.device,
+      hasStream: endpoints.some((e) => e.toLowerCase().includes("stream")),
+    };
+  } catch (e: any) {
+    return { ok: false, hasStream: false, error: e?.message ?? String(e) };
+  } finally {
+    clearTimeout(to);
+  }
 }

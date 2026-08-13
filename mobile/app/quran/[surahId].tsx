@@ -1,499 +1,553 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  View, Text, StyleSheet, Pressable, ScrollView,
-  ActivityIndicator, Platform,
+  View,
+  Text,
+  Pressable,
+  ScrollView,
+  ActivityIndicator,
+  Platform,
+  StyleSheet,
 } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 
-import { SURAH_MAP, type QuranWord } from "@/data/juzamma";
-import { speakArabic, stopSpeaking } from "@/lib/tts";
-import { assessAudioSmart, type AssessResponse, type AssessMeta } from "@/lib/api";
-import { useAutoRecorder } from "@/hooks/useAutoRecorder";
+import { SURAHS } from "@/data/juzamma";
 import { useBackend } from "@/store/useBackend";
 import { useProgress } from "@/store/useProgress";
-import { LetterFeedback } from "@/components/LetterFeedback";
-import { LatencyChip } from "@/components/LatencyChip";
+import { speakArabic, stopSpeaking } from "@/lib/tts";
+import { useAyahRecorder } from "@/hooks/useAyahRecorder";
+import {
+  getStreamSession,
+  type AyahProgress,
+  type AyahWordEvent,
+} from "@/lib/stream";
+import { assessAudioHttp } from "@/lib/api";
+import { WordChip, type WordChipState } from "@/components/WordChip";
 import { PulsingMic } from "@/components/PulsingMic";
+import { StarBurst } from "@/components/StarBurst";
 
-type Phase = "idle" | "tts" | "listening" | "processing" | "result" | "error";
-
-// Wort-Chip-Status.
-type ChipStatus = "pending" | "active" | "good" | "meh" | "bad";
+type Phase = "idle" | "tts" | "listening" | "scoring" | "result" | "error";
 
 const AR_DIGITS = ["٠", "١", "٢", "٣", "٤", "٥", "٦", "٧", "٨", "٩"];
 const toArabicNumber = (n: number) =>
   String(n).split("").map((d) => AR_DIGITS[Number(d)] ?? d).join("");
 
-const chipColor = (s: ChipStatus) => {
-  switch (s) {
-    case "good": return { bg: "#dcfce7", border: "#22c55e", fg: "#166534" };
-    case "meh":  return { bg: "#fef9c3", border: "#eab308", fg: "#854d0e" };
-    case "bad":  return { bg: "#fee2e2", border: "#ef4444", fg: "#991b1b" };
-    case "active": return { bg: "#dbeafe", border: "#3b82f6", fg: "#1e3a8a" };
-    default: return { bg: "#ffffff", border: "#e2e8f0", fg: "#0f172a" };
-  }
-};
+function stateFromScore(score: number): WordChipState {
+  if (score >= 75) return "good";
+  if (score >= 50) return "medium";
+  return "bad";
+}
 
-export default function QuranSurahScreen() {
+export default function QuranAyahScreen() {
   const { surahId } = useLocalSearchParams<{ surahId: string }>();
   const router = useRouter();
-  const insets = useSafeAreaInsets();
   const backendUrl = useBackend((s) => s.url);
   const streaming  = useBackend((s) => s.streaming);
-  const addResult = useProgress((s) => s.addResult);
-  const wordsMastered = useProgress((s) => s.wordsMastered);
+  const addResult  = useProgress((s) => s.addResult);
+  const insets = useSafeAreaInsets();
 
-  const surah = useMemo(() => SURAH_MAP[Number(surahId)], [surahId]);
+  const surah = useMemo(
+    () => SURAHS.find((s) => s.n === Number(surahId)),
+    [surahId],
+  );
 
-  // Ayah-Index (0 = Basmala, danach 1..N).
+  // Nur Sprech-Ayat: die synthetische Basmala (n=0) ueberspringen.
+  const ayat = useMemo(() => surah?.ayat.filter((a) => a.n > 0) ?? [], [surah]);
   const [ayahIdx, setAyahIdx] = useState(0);
-  // Wort-Index innerhalb der aktuellen Ayah.
-  const [wordIdx, setWordIdx] = useState(0);
+  const ayah = ayat[ayahIdx];
+
   const [phase, setPhase] = useState<Phase>("idle");
-  const [result, setResult] = useState<AssessResponse | null>(null);
-  const [meta, setMeta] = useState<AssessMeta | null>(null);
   const [errMsg, setErrMsg] = useState<string | null>(null);
-  // Score pro Wort dieser Sitzung, um Chips einzufaerben.
-  const [sessionScores, setSessionScores] = useState<Record<string, number>>({});
+  const [totalScore, setTotalScore] = useState<number | null>(null);
+  const [serverMs, setServerMs] = useState<number | null>(null);
 
-  const ayah = surah?.ayat[ayahIdx];
-  const word: QuranWord | undefined = ayah?.words[wordIdx];
-
-  const wordKey = (aN: number, w: string) => `quran:${surah?.n}:${aN}:${w}`;
-
-  const rec = useAutoRecorder(async (uri) => {
-    if (!uri || !word) {
-      setErrMsg("Keine Aufnahme empfangen.");
-      setPhase("error");
-      return;
-    }
-    setPhase("processing");
-    try {
-      const r = await assessAudioSmart(backendUrl, uri, word.ar, streaming);
-      const { _meta, ...clean } = r as any;
-      setResult(clean);
-      setMeta(_meta);
-      setPhase("result");
-      const key = wordKey(ayah!.n, word.ar);
-      addResult(key, r.total);
-      setSessionScores((s) => ({ ...s, [key]: r.total }));
-      if (Platform.OS !== "web") {
-        Haptics.notificationAsync(
-          r.total >= 75
-            ? Haptics.NotificationFeedbackType.Success
-            : Haptics.NotificationFeedbackType.Warning,
-        );
-      }
-    } catch (e: any) {
-      setErrMsg(e?.message ?? "Netzwerkfehler");
-      setPhase("error");
-    }
-  });
+  // wordStates: parallel zu ayah.words, Zustand + optional Score
+  const [wordStates, setWordStates] = useState<
+    Array<{ state: WordChipState; score?: number; units?: AyahWordEvent["units"] }>
+  >([]);
 
   const nextTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const doneOnceRef = useRef<boolean>(false);
 
-  const runWord = () => {
-    if (!word) return;
-    setResult(null);
-    setErrMsg(null);
-    setPhase("tts");
-    speakArabic(word.ar, () => {
-      setTimeout(() => {
-        setPhase("listening");
-        rec.start();
-      }, 150);
-    });
-  };
-
+  // Beim Screen-Mount: WS vorwaermen (spart 300-500ms bei der ersten Ayah).
   useEffect(() => {
-    if (!backendUrl || !surah || !word) return;
-    runWord();
+    if (backendUrl && streaming) {
+      getStreamSession(backendUrl).warmUp();
+    }
     return () => {
       stopSpeaking();
       if (nextTimer.current) clearTimeout(nextTimer.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [surahId, ayahIdx, wordIdx, backendUrl]);
+  }, [backendUrl, streaming]);
 
-  // Autoadvance nur bei gutem Score.
+  // Bei Wechsel der Ayah: States zuruecksetzen.
   useEffect(() => {
-    if (phase !== "result" || !result) return;
-    if (result.total >= 75) {
-      nextTimer.current = setTimeout(goNext, 1600);
+    if (!ayah) return;
+    setPhase("idle");
+    setErrMsg(null);
+    setTotalScore(null);
+    setServerMs(null);
+    setWordStates(ayah.words.map(() => ({ state: "pending" })));
+    doneOnceRef.current = false;
+  }, [ayah]);
+
+  // ------- Aufnahme + Bewertung -------
+  const onRecordingStop = useCallback(async (uri: string | null) => {
+    if (!ayah) return;
+    if (!uri) {
+      setErrMsg("Keine Aufnahme empfangen.");
+      setPhase("error");
+      return;
+    }
+    setPhase("scoring");
+    // Alle Woerter auf 'scanning' -> UI zeigt Shimmer / Erwartung
+    setWordStates(ayah.words.map(() => ({ state: "scanning" })));
+
+    const ayahText = ayah.words.map((w) => w.ar).join(" ");
+    const key = (idx: number) => `quran:${surah?.n}:${ayah.n}:${ayah.words[idx]?.ar}`;
+
+    const applyWord = (ev: AyahWordEvent) => {
+      setWordStates((prev) => {
+        const next = [...prev];
+        if (ev.word_idx < 0 || ev.word_idx >= next.length) return next;
+        next[ev.word_idx] = {
+          state: stateFromScore(ev.score),
+          score: ev.score,
+          units: ev.units,
+        };
+        return next;
+      });
+      // Punkte pro Wort direkt gutschreiben (persistenter Fortschritt).
+      addResult(key(ev.word_idx), ev.score);
+      if (Platform.OS !== "web") {
+        Haptics.selectionAsync().catch(() => {});
+      }
+    };
+
+    // 1) WS-Weg mit progressivem Streaming
+    if (streaming && backendUrl) {
+      try {
+        const session = getStreamSession(backendUrl);
+        const done = await session.assessAyah(uri, ayahText, (ev: AyahProgress) => {
+          if (ev.kind === "word") applyWord(ev);
+        });
+        setTotalScore(done.total);
+        setServerMs(done.duration_ms);
+        setPhase("result");
+        if (Platform.OS !== "web") {
+          Haptics.notificationAsync(
+            done.total >= 75
+              ? Haptics.NotificationFeedbackType.Success
+              : Haptics.NotificationFeedbackType.Warning,
+          ).catch(() => {});
+        }
+        return;
+      } catch {
+        // stiller Fallback -> HTTP-Wort-fuer-Wort mit visuellem "Progress-Fake"
+      }
+    }
+
+    // 2) HTTP-Fallback: Wort-fuer-Wort sequenziell scoren (langsamer, aber tut es).
+    try {
+      let sum = 0;
+      let n = 0;
+      const t0 = Date.now();
+      for (let i = 0; i < ayah.words.length; i++) {
+        try {
+          const r = await assessAudioHttp(backendUrl, uri, ayah.words[i].ar);
+          applyWord({
+            kind: "word",
+            word_idx: i,
+            target: r.target,
+            score: r.total,
+            units: r.units,
+          });
+          sum += r.total;
+          n++;
+        } catch {
+          setWordStates((prev) => {
+            const next = [...prev];
+            next[i] = { state: "bad", score: 0 };
+            return next;
+          });
+        }
+      }
+      const total = n > 0 ? sum / n : 0;
+      setTotalScore(total);
+      setServerMs(Date.now() - t0);
+      setPhase("result");
+    } catch (e: any) {
+      setErrMsg(e?.message ?? "Netzwerkfehler.");
+      setPhase("error");
+    }
+  }, [ayah, backendUrl, streaming, surah, addResult]);
+
+  const rec = useAyahRecorder(onRecordingStop);
+
+  const startRecord = useCallback(() => {
+    if (!ayah) return;
+    setErrMsg(null);
+    setTotalScore(null);
+    setServerMs(null);
+    setWordStates(ayah.words.map(() => ({ state: "pending" })));
+    setPhase("listening");
+    rec.start();
+  }, [ayah, rec]);
+
+  const listenTts = useCallback(() => {
+    if (!ayah || phase === "listening" || phase === "scoring") return;
+    setPhase("tts");
+    const t = ayah.words.map((w) => w.ar).join(" ");
+    speakArabic(t, () => setPhase("idle"));
+  }, [ayah, phase]);
+
+  // Auto-Next bei sehr gutem Ergebnis
+  useEffect(() => {
+    if (phase !== "result" || totalScore == null) return;
+    if (totalScore >= 85 && !doneOnceRef.current) {
+      doneOnceRef.current = true;
+      nextTimer.current = setTimeout(() => goNext(), 1800);
     }
     return () => { if (nextTimer.current) clearTimeout(nextTimer.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, result]);
+  }, [phase, totalScore]);
 
   const goNext = () => {
-    if (!surah || !ayah) return;
-    if (wordIdx < ayah.words.length - 1) {
-      setWordIdx((i) => i + 1);
-      return;
-    }
-    // Naechste Ayah.
-    if (ayahIdx < surah.ayat.length - 1) {
-      setAyahIdx((i) => i + 1);
-      setWordIdx(0);
-      return;
-    }
-    // Sura fertig.
-    router.back();
+    if (!ayat.length) { router.back(); return; }
+    if (ayahIdx >= ayat.length - 1) { router.back(); return; }
+    setAyahIdx(ayahIdx + 1);
   };
-
   const goPrev = () => {
-    if (!surah) return;
-    if (wordIdx > 0) { setWordIdx((i) => i - 1); return; }
-    if (ayahIdx > 0) {
-      const prev = surah.ayat[ayahIdx - 1];
-      setAyahIdx((i) => i - 1);
-      setWordIdx(prev.words.length - 1);
-    }
+    if (ayahIdx <= 0) return;
+    setAyahIdx(ayahIdx - 1);
   };
 
+  // ------- Guards -------
   if (!surah) {
     return (
       <SafeAreaView style={[styles.root, styles.center]}>
-        <Text>Sura nicht gefunden.</Text>
+        <Text style={styles.headline}>Sura nicht gefunden.</Text>
         <Pressable onPress={() => router.back()} style={styles.primaryBtn}>
           <Text style={styles.primaryBtnText}>Zurück</Text>
         </Pressable>
       </SafeAreaView>
     );
   }
-
   if (!backendUrl) {
     return (
       <SafeAreaView style={[styles.root, styles.center]}>
-        <Text style={styles.title}>Erst Backend einrichten</Text>
+        <Text style={styles.headline}>Backend fehlt</Text>
+        <Text style={styles.sub}>Öffne die Einstellungen und trage die Colab-URL ein.</Text>
         <Pressable onPress={() => router.push("/settings" as any)} style={styles.primaryBtn}>
           <Text style={styles.primaryBtnText}>Zu den Einstellungen</Text>
         </Pressable>
       </SafeAreaView>
     );
   }
+  if (!ayah) {
+    return (
+      <SafeAreaView style={[styles.root, styles.center]}>
+        <Text style={styles.headline}>Keine Verse verfügbar.</Text>
+      </SafeAreaView>
+    );
+  }
 
-  const busy = phase === "tts" || phase === "listening" || phase === "processing";
-  const totalWords = ayah?.words.length ?? 0;
-  const isBasmala = ayah?.n === 0;
-  const ayahLabel = isBasmala ? "Basmala" : `Vers ${ayah?.n}`;
+  const busy = phase === "listening" || phase === "scoring" || phase === "tts";
+  const percent = ((ayahIdx + 1) / ayat.length) * 100;
 
   return (
     <SafeAreaView style={styles.root} edges={["top", "left", "right"]}>
       {/* Header */}
       <View style={styles.header}>
-        <Pressable onPress={() => router.back()} style={styles.iconBtn} hitSlop={10}>
+        <Pressable
+          onPress={() => router.back()}
+          style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
+          hitSlop={10}
+        >
           <Ionicons name="chevron-back" size={22} color="#334155" />
         </Pressable>
         <View style={styles.headerCenter}>
-          <Text style={styles.headerTitle} allowFontScaling={false}>
+          <Text style={styles.headerAr} allowFontScaling={false}>
             سُورَة {surah.name_ar}
           </Text>
-          <Text style={styles.headerSub}>
-            {surah.translit} · {ayahLabel} · Wort {wordIdx + 1}/{totalWords}
+          <Text style={styles.headerMeta}>
+            {surah.translit} · Vers {ayahIdx + 1} / {ayat.length}
           </Text>
         </View>
-        <Pressable
-          onPress={() => speakArabic(ayah!.words.map((w) => w.ar).join(" "))}
-          style={styles.iconBtn}
-          hitSlop={10}
-        >
-          <Ionicons name="volume-high" size={20} color="#3b82f6" />
-        </Pressable>
+        <View style={{ width: 40 }} />
       </View>
 
-      {/* Ayah-Fortschritt */}
       <View style={styles.progressBg}>
-        <View style={[styles.progressFill, { width: `${((ayahIdx + 1) / surah.ayat.length) * 100}%` }]} />
+        <View style={[styles.progressFill, { width: `${percent}%` }]} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
-        {/* Ayah-Zeile: alle Woerter als Chips, RTL, aktuelles Wort hervorgehoben. */}
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={[styles.scrollContent, { paddingBottom: insets.bottom + 24 }]}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Ayah-Karte */}
         <View style={styles.ayahCard}>
-          {!isBasmala && (
-            <View style={styles.ayahNumRow}>
-              <View style={styles.ayahNumBadge}>
-                <Text style={styles.ayahNumText}>﴿ {toArabicNumber(ayah!.n)} ﴾</Text>
-              </View>
+          <View style={styles.ayahHeader}>
+            <View style={styles.ayahBadge}>
+              <Text style={styles.ayahBadgeText}>{toArabicNumber(ayah.n)}</Text>
             </View>
-          )}
-          <View style={styles.chipRow}>
-            {ayah!.words.map((wd, i) => {
-              let st: ChipStatus = "pending";
-              if (i === wordIdx) st = "active";
-              else {
-                const k = wordKey(ayah!.n, wd.ar);
-                const score = sessionScores[k] ?? wordsMastered[k];
-                if (score !== undefined) {
-                  st = score >= 75 ? "good" : score >= 50 ? "meh" : "bad";
-                }
-              }
-              const c = chipColor(st);
+            <Text style={styles.ayahHeaderText}>Vers</Text>
+          </View>
+
+          <View style={styles.ayahWordsWrap}>
+            {ayah.words.map((w, i) => {
+              const st = wordStates[i]?.state ?? "pending";
+              const sc = wordStates[i]?.score;
               return (
-                <Pressable
-                  key={`${i}-${wd.ar}`}
-                  onPress={() => { if (!busy) { setWordIdx(i); } }}
-                  onLongPress={() => speakArabic(wd.ar)}
-                  style={[styles.chip, { backgroundColor: c.bg, borderColor: c.border }]}
-                >
-                  <Text style={[styles.chipAr, { color: c.fg }]} allowFontScaling={false}>
-                    {wd.ar}
-                  </Text>
-                </Pressable>
+                <WordChip
+                  key={`${w.ar}-${i}`}
+                  word={w.ar}
+                  state={st}
+                  score={sc}
+                />
               );
             })}
           </View>
         </View>
 
-        {/* Grosses aktuelles Wort */}
-        <View style={styles.wordCard}>
-          <Text style={styles.bigWord} allowFontScaling={false}>{word?.ar}</Text>
-          {word?.translit ? <Text style={styles.translit}>{word.translit}</Text> : null}
-        </View>
-
-        {/* Phasen-Anzeige */}
+        {/* Zustandsblock */}
         <View style={styles.phaseWrap}>
+          {phase === "idle" && (
+            <Text style={styles.hint}>Tippe auf „Aufnehmen" und rezitiere die Ayah.</Text>
+          )}
           {phase === "tts" && (
-            <View style={styles.phaseRow}>
-              <Ionicons name="volume-high" size={26} color="#2563eb" />
-              <Text style={styles.phaseText}>Hör gut zu…</Text>
+            <View style={styles.row}>
+              <Ionicons name="volume-high" size={22} color="#2563eb" />
+              <Text style={[styles.hint, { color: "#2563eb" }]}>Hör gut zu…</Text>
             </View>
           )}
           {phase === "listening" && (
             <>
               <PulsingMic active level={rec.level} />
-              <Text style={[styles.phaseText, { color: "#ef4444", marginTop: 10 }]}>
-                Sag es nach!
+              <Text style={[styles.hint, { color: "#ef4444", marginTop: 12 }]}>
+                Rezitiere die Ayah!
               </Text>
             </>
           )}
-          {phase === "processing" && (
-            <View style={{ alignItems: "center" }}>
-              <ActivityIndicator size="large" color="#2563eb" />
-              <Text style={styles.subMuted}>Bewertung…</Text>
+          {phase === "scoring" && (
+            <View style={styles.row}>
+              <ActivityIndicator size="small" color="#2563eb" />
+              <Text style={[styles.hint, { color: "#2563eb" }]}>Bewertung läuft…</Text>
+            </View>
+          )}
+          {phase === "result" && totalScore != null && (
+            <View style={styles.resultBlock}>
+              <StarBurst show={totalScore >= 75} />
+              <Text style={styles.scoreBig}>{Math.round(totalScore)}</Text>
+              <Text style={styles.scoreLabel}>
+                {totalScore >= 90 ? "Ma šāʾ Allāh!" :
+                 totalScore >= 75 ? "Sehr gut!"     :
+                 totalScore >= 50 ? "Noch mal üben." : "Versuch es nochmal."}
+              </Text>
+              {serverMs != null && (
+                <Text style={styles.metaText}>
+                  {streaming ? "⚡ Live-Streaming" : "HTTP"} · {serverMs} ms
+                </Text>
+              )}
             </View>
           )}
           {phase === "error" && (
-            <View style={{ alignItems: "center" }}>
-              <Text style={{ color: "#ef4444", textAlign: "center" }}>{errMsg}</Text>
-              <Pressable onPress={runWord} style={styles.primaryBtn}>
-                <Text style={styles.primaryBtnText}>Nochmal versuchen</Text>
-              </Pressable>
+            <View style={styles.row}>
+              <Ionicons name="warning" size={20} color="#ef4444" />
+              <Text style={[styles.hint, { color: "#ef4444" }]}>{errMsg}</Text>
             </View>
           )}
         </View>
-
-        {/* Ergebnis */}
-        {phase === "result" && result && (
-          <View style={styles.resultCard}>
-            <LetterFeedback units={result.units} />
-            <Text style={styles.subMuted}>
-              Du hast gesagt: <Text style={styles.arSmall}>{result.transcription || "—"}</Text>
-            </Text>
-            <ScoreBar total={result.total} />
-            <LatencyChip meta={meta ?? undefined} serverMs={result.duration_ms} />
-          </View>
-        )}
       </ScrollView>
 
-      {/* Footer */}
-      <View style={[styles.footer, { paddingBottom: Math.max(insets.bottom, 12) + 8 }]}>
+      {/* Aktions-Leiste */}
+      <View style={[styles.actionBar, { paddingBottom: 12 + insets.bottom }]}>
         <Pressable
           onPress={goPrev}
-          disabled={busy || (ayahIdx === 0 && wordIdx === 0)}
+          disabled={busy || ayahIdx <= 0}
           style={({ pressed }) => [
-            styles.footerBtn, styles.footerSecondary,
-            (busy || (ayahIdx === 0 && wordIdx === 0)) && { opacity: 0.4 },
+            styles.secondaryBtn,
+            (busy || ayahIdx <= 0) && styles.btnDisabled,
             pressed && styles.pressed,
           ]}
         >
-          <Ionicons name="chevron-back" size={18} color="#334155" />
-          <Text style={styles.footerSecondaryText}>Zurück</Text>
+          <Ionicons name="chevron-back" size={20} color="#334155" />
         </Pressable>
+
         <Pressable
-          onPress={() => { setResult(null); runWord(); }}
+          onPress={listenTts}
           disabled={busy}
           style={({ pressed }) => [
-            styles.footerBtn, styles.footerRetry,
-            busy && { opacity: 0.5 },
+            styles.secondaryBtn,
+            busy && styles.btnDisabled,
             pressed && styles.pressed,
           ]}
         >
-          <Ionicons name="reload" size={18} color="#334155" />
-          <Text style={styles.footerSecondaryText}>Nochmal</Text>
+          <Ionicons name="volume-high" size={22} color="#2563eb" />
+          <Text style={styles.secondaryText}>Anhören</Text>
         </Pressable>
+
+        <Pressable
+          onPress={phase === "listening" ? rec.stop : startRecord}
+          disabled={phase === "scoring" || phase === "tts"}
+          style={({ pressed }) => [
+            styles.primaryBtnBig,
+            (phase === "scoring" || phase === "tts") && styles.btnDisabled,
+            phase === "listening" && styles.primaryBtnStop,
+            pressed && styles.pressed,
+          ]}
+        >
+          <Ionicons
+            name={phase === "listening" ? "stop" : "mic"}
+            size={26}
+            color="#ffffff"
+          />
+          <Text style={styles.primaryBtnBigText}>
+            {phase === "listening" ? "Stopp" : "Aufnehmen"}
+          </Text>
+        </Pressable>
+
         <Pressable
           onPress={goNext}
           disabled={busy}
           style={({ pressed }) => [
-            styles.footerBtn, styles.footerPrimary,
-            busy && { opacity: 0.5 },
+            styles.secondaryBtn,
+            busy && styles.btnDisabled,
             pressed && styles.pressed,
           ]}
         >
-          <Text style={styles.footerPrimaryText}>Weiter</Text>
-          <Ionicons name="chevron-forward" size={18} color="white" />
+          <Ionicons name="chevron-forward" size={20} color="#334155" />
         </Pressable>
       </View>
     </SafeAreaView>
   );
 }
 
-function ScoreBar({ total }: { total: number }) {
-  const t = Math.round(total);
-  const color = t >= 75 ? "#22c55e" : t >= 50 ? "#f59e0b" : "#ef4444";
-  const label = t >= 75 ? "🌟 Sehr gut!" : t >= 50 ? "🙂 Fast!" : "💪 Nochmal!";
-  return (
-    <View style={{ width: "100%", marginTop: 12 }}>
-      <View style={{ height: 10, backgroundColor: "#e2e8f0", borderRadius: 5, overflow: "hidden" }}>
-        <View style={{ width: `${t}%`, height: "100%", backgroundColor: color }} />
-      </View>
-      <Text style={{ textAlign: "center", fontSize: 16, fontWeight: "700", marginTop: 6 }}>
-        {label} {t} / 100
-      </Text>
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: "#f8fafc" },
-  center: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24 },
-  title: { fontSize: 20, fontWeight: "700", color: "#0f172a", textAlign: "center" },
-  subMuted: { color: "#64748b", textAlign: "center", marginTop: 6 },
-  pressed: { opacity: 0.75, transform: [{ scale: 0.98 }] },
-  arSmall: { fontSize: 20, color: "#0f172a", writingDirection: "rtl" },
-  primaryBtn: {
-    marginTop: 12,
-    backgroundColor: "#3b82f6",
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    borderRadius: 22,
-  },
-  primaryBtnText: { color: "white", fontWeight: "700" },
+  center: { flex: 1, alignItems: "center", justifyContent: "center", padding: 32 },
 
   header: {
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: 12,
     paddingVertical: 8,
-    gap: 8,
-  },
-  iconBtn: {
-    width: 40, height: 40, borderRadius: 20, backgroundColor: "white",
-    alignItems: "center", justifyContent: "center",
-    borderWidth: 1, borderColor: "#e2e8f0",
   },
   headerCenter: { flex: 1, alignItems: "center" },
-  headerTitle: { fontSize: 20, color: "#0f172a", writingDirection: "rtl" },
-  headerSub: { color: "#64748b", fontSize: 12, marginTop: 2 },
+  headerAr: { fontSize: 20, fontWeight: "700", color: "#0f172a", writingDirection: "rtl" },
+  headerMeta: { fontSize: 12, color: "#64748b", marginTop: 2 },
+
+  iconBtn: {
+    width: 40, height: 40, borderRadius: 20,
+    backgroundColor: "#ffffff", alignItems: "center", justifyContent: "center",
+    borderWidth: 1, borderColor: "#e2e8f0",
+  },
+  pressed: { opacity: 0.75 },
 
   progressBg: {
-    height: 6, marginHorizontal: 20, backgroundColor: "#e2e8f0",
-    borderRadius: 3, overflow: "hidden",
+    height: 6, backgroundColor: "#e2e8f0",
+    marginHorizontal: 16, marginTop: 4, borderRadius: 3, overflow: "hidden",
   },
-  progressFill: { height: "100%", backgroundColor: "#3b82f6" },
+  progressFill: { height: 6, backgroundColor: "#22c55e" },
 
-  scroll: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 24 },
+  scroll: { flex: 1 },
+  scrollContent: { padding: 16, paddingTop: 20, alignItems: "stretch" },
 
   ayahCard: {
-    backgroundColor: "white",
-    borderRadius: 16,
-    padding: 14,
-    shadowColor: "#0f172a",
+    backgroundColor: "#ffffff",
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    padding: 16,
+    shadowColor: "#000",
     shadowOpacity: 0.05,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 1,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 2,
   },
-  ayahNumRow: { flexDirection: "row", justifyContent: "flex-end" },
-  ayahNumBadge: {
+  ayahHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 8,
+  },
+  ayahBadge: {
+    minWidth: 32, height: 32, borderRadius: 16,
+    backgroundColor: "#eef2ff", borderColor: "#c7d2fe", borderWidth: 1,
+    alignItems: "center", justifyContent: "center",
     paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 12,
-    backgroundColor: "#f1f5f9",
   },
-  ayahNumText: { color: "#334155", fontSize: 13, fontWeight: "700" },
-  chipRow: {
+  ayahBadgeText: { color: "#4338ca", fontWeight: "800", fontSize: 14 },
+  ayahHeaderText: { color: "#64748b", fontSize: 13 },
+
+  ayahWordsWrap: {
     flexDirection: "row-reverse",
     flexWrap: "wrap",
-    gap: 8,
-    justifyContent: "flex-start",
-    marginTop: 8,
+    justifyContent: "center",
+    paddingVertical: 6,
   },
-  chip: {
-    borderWidth: 2,
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    minHeight: 44,
+
+  phaseWrap: {
+    marginTop: 22,
     alignItems: "center",
+    minHeight: 120,
     justifyContent: "center",
   },
-  chipAr: { fontSize: 22, writingDirection: "rtl" },
+  row: { flexDirection: "row", alignItems: "center", gap: 8 },
+  hint: { color: "#334155", fontSize: 15, textAlign: "center" },
 
-  wordCard: {
-    marginTop: 14,
-    backgroundColor: "white",
-    borderRadius: 20,
-    paddingVertical: 24,
-    alignItems: "center",
-    shadowColor: "#0f172a",
-    shadowOpacity: 0.06,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 2,
+  resultBlock: { alignItems: "center", position: "relative" },
+  scoreBig: {
+    fontSize: 56, fontWeight: "900", color: "#0f172a", letterSpacing: -1,
   },
-  bigWord: { fontSize: 68, lineHeight: 92, color: "#0f172a", writingDirection: "rtl", textAlign: "center" },
-  translit: { color: "#64748b", fontStyle: "italic", fontSize: 16, marginTop: 4 },
+  scoreLabel: { fontSize: 16, fontWeight: "600", color: "#334155", marginTop: 4 },
+  metaText: { fontSize: 11, color: "#94a3b8", marginTop: 10, fontWeight: "600" },
 
-  phaseWrap: { marginTop: 20, alignItems: "center", minHeight: 100, justifyContent: "center" },
-  phaseRow: { flexDirection: "row", alignItems: "center", gap: 10 },
-  phaseText: { color: "#2563eb", fontSize: 17 },
-
-  resultCard: {
-    marginTop: 16,
-    width: "100%",
-    alignItems: "center",
-    backgroundColor: "white",
-    borderRadius: 20,
-    paddingVertical: 18,
-    paddingHorizontal: 16,
-    shadowColor: "#0f172a",
-    shadowOpacity: 0.06,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 2,
-  },
-
-  footer: {
+  actionBar: {
     flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     paddingHorizontal: 12,
     paddingTop: 10,
     gap: 8,
-    backgroundColor: "white",
+    backgroundColor: "#ffffff",
     borderTopWidth: 1,
     borderTopColor: "#e2e8f0",
-    shadowColor: "#0f172a",
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: -2 },
-    elevation: 8,
   },
-  footerBtn: {
+  secondaryBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 14,
+    backgroundColor: "#f1f5f9",
+  },
+  secondaryText: { color: "#334155", fontSize: 14, fontWeight: "700" },
+  primaryBtnBig: {
     flex: 1,
-    minHeight: 48,
-    borderRadius: 24,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    gap: 6,
+    gap: 8,
+    paddingHorizontal: 18,
+    paddingVertical: 14,
+    borderRadius: 16,
+    backgroundColor: "#ef4444",
   },
-  footerSecondary: { backgroundColor: "#f1f5f9", borderWidth: 1, borderColor: "#e2e8f0" },
-  footerRetry: { backgroundColor: "#fef3c7", borderWidth: 1, borderColor: "#fde68a" },
-  footerSecondaryText: { color: "#334155", fontWeight: "700", fontSize: 14 },
-  footerPrimary: { backgroundColor: "#22c55e", flex: 1.2 },
-  footerPrimaryText: { color: "white", fontWeight: "700", fontSize: 15 },
+  primaryBtnStop: { backgroundColor: "#0f172a" },
+  primaryBtnBigText: { color: "#ffffff", fontSize: 16, fontWeight: "800" },
+  btnDisabled: { opacity: 0.4 },
+
+  headline: { fontSize: 20, fontWeight: "800", color: "#0f172a", marginBottom: 8 },
+  sub: { color: "#64748b", textAlign: "center", marginBottom: 16 },
+  primaryBtn: {
+    marginTop: 12,
+    paddingHorizontal: 20, paddingVertical: 12,
+    backgroundColor: "#2563eb", borderRadius: 14,
+  },
+  primaryBtnText: { color: "white", fontWeight: "800", fontSize: 16 },
 });
