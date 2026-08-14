@@ -23,7 +23,6 @@ export default function PlayScreen() {
   const { categoryId } = useLocalSearchParams<{ categoryId: CategoryId }>();
   const router = useRouter();
   const backendUrl = useBackend((s) => s.url);
-  const streaming  = useBackend((s) => s.streaming);
   const addResult = useProgress((s) => s.addResult);
 
   const category = useMemo(() => CATEGORIES.find((c) => c.id === categoryId), [categoryId]);
@@ -45,7 +44,7 @@ export default function PlayScreen() {
     }
     setPhase("processing");
     try {
-      const r = await assessAudioSmart(backendUrl, uri, word.ar, streaming);
+      const r = await assessAudioSmart(backendUrl, uri, word.ar);
       const { _meta, ...clean } = r as any;
       setResult(clean);
       setMeta(_meta);

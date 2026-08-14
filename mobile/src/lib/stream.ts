@@ -7,22 +7,20 @@
 //        die UI die Wörter progressiv einfärben kann.
 //
 // Design-Entscheidungen (siehe /memories/repo/quran-app-websocket.md):
-//   - HTTPS wird zu WSS gemappt (Cloudflared Quick Tunnel).
+//   - HTTPS wird zu WSS gemappt (ngrok / Cloudflared Quick Tunnel).
 //   - Server-Keep-Alive alle 20s ("ping":true) wird stumm ignoriert.
-//   - Circuit-Breaker: nach 2 aufeinanderfolgenden Fehlern kein WS-Versuch
-//     für 20s -> Client fällt sofort in HTTP-Fallback (kein Multi-Sekunden-
-//     Stall bei Cloudflared-Ausfall).
 //   - warmUp() als fire-and-forget beim Screen-Mount, damit das erste Wort
 //     nicht die Connect-Latenz bezahlt.
+//   - HTTP-Fallback existiert nicht mehr: Fehler werden hoch propagiert und
+//     als Fehlerzustand in der UI angezeigt.
 
 import { readUriAsArrayBuffer } from "@/lib/audioBytes";
+import { useDebug } from "@/store/useDebug";
 import type { AssessResponse } from "@/lib/api";
 
 const CONNECT_TIMEOUT_MS  = 7000;
 const REQUEST_TIMEOUT_MS  = 15000;
 const AYAH_TIMEOUT_MS     = 25000;
-const CIRCUIT_TRIP_AT     = 2;
-const CIRCUIT_COOLDOWN_MS = 20000;
 
 // --- Ayah-Frame-Typen (spiegelt Backend-JSON) ---
 export type AyahStartEvent = {
@@ -48,8 +46,27 @@ export type AyahDoneEvent = {
   total: number;
   words_count: number;
   duration_ms: number;
+  timings?: {
+    audio_bytes?: number;
+    audio_samples?: number;
+    audio_ms?: number;
+    bytes_recv_ms?: number;
+    preprocess_ms?: number;
+    asr_ms?: number;
+    align_ms?: number;
+    score_ms?: number;
+  };
 };
 export type AyahProgress = AyahStartEvent | AyahWordEvent | AyahDoneEvent;
+
+/** Client-seitige Latenz-Aufschluesselung fuer Diagnose (Anzeige + Log). */
+export type AyahClientTimings = {
+  bytes_read_ms: number;     // URI -> ArrayBuffer
+  ws_send_ms: number;        // ws.send(text+bytes)
+  first_frame_ms: number;    // vom Send bis "start"-Frame (~ RTT + Backend-Compute)
+  last_frame_ms: number;     // vom Send bis "done"-Frame
+  bytes: number;
+};
 
 function httpToWs(url: string): string {
   if (!url) return url;
@@ -61,8 +78,6 @@ class StreamSession {
   private ws: WebSocket | null = null;
   private connecting: Promise<WebSocket> | null = null;
   private queue: Promise<any> = Promise.resolve();
-  private failStreak = 0;
-  private circuitOpenUntil = 0;
 
   constructor(private backendUrl: string) {}
 
@@ -73,21 +88,6 @@ class StreamSession {
 
   /** Public alias fuer dispose() zur externen Nutzung. */
   close(): void { this.dispose(); }
-  private isCircuitOpen(): boolean {
-    return Date.now() < this.circuitOpenUntil;
-  }
-
-  private tripCircuit() {
-    this.failStreak++;
-    if (this.failStreak >= CIRCUIT_TRIP_AT) {
-      this.circuitOpenUntil = Date.now() + CIRCUIT_COOLDOWN_MS;
-    }
-  }
-
-  private resetCircuit() {
-    this.failStreak = 0;
-    this.circuitOpenUntil = 0;
-  }
 
   private closeSocket() {
     if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
@@ -117,11 +117,13 @@ class StreamSession {
       ws.onopen = () => {
         clearTimeout(to);
         this.ws = ws;
+        useDebug.getState().push("ws_open", `WS verbunden ${url}`);
         resolve(ws);
       };
       ws.onerror = () => {
         clearTimeout(to);
         this.ws = null;
+        useDebug.getState().push("ws_error", "WS onerror beim Connect");
         reject(new Error("WS-Error beim Connect"));
       };
       ws.onclose = () => {
@@ -135,7 +137,6 @@ class StreamSession {
   }
 
   warmUp(): void {
-    if (this.isCircuitOpen()) return;
     this.connect().catch(() => { /* still */ });
   }
 
@@ -150,15 +151,12 @@ class StreamSession {
   }
 
   assessWord(uri: string, target: string): Promise<AssessResponse> {
-    if (this.isCircuitOpen()) return Promise.reject(new Error("WS-Circuit offen"));
-
     return this.enqueue(async () => {
       const ws = await this.connect();
       const bytes = await readUriAsArrayBuffer(uri);
 
       return await new Promise<AssessResponse>((resolve, reject) => {
         const to = setTimeout(() => {
-          this.tripCircuit();
           this.closeSocket();
           reject(new Error("WS-Request-Timeout"));
         }, REQUEST_TIMEOUT_MS);
@@ -169,28 +167,23 @@ class StreamSession {
             if (data?.ping) return;                 // keep-alive -> ignore
             if (data?.error) {
               cleanup();
-              this.tripCircuit();
               reject(new Error(String(data.error)));
               return;
             }
             cleanup();
-            this.resetCircuit();
             resolve(data as AssessResponse);
           } catch (e: any) {
             cleanup();
-            this.tripCircuit();
             reject(new Error(`JSON-Parse: ${e?.message ?? e}`));
           }
         };
         const onErr = () => {
           cleanup();
-          this.tripCircuit();
           this.closeSocket();
           reject(new Error("WS-Error während Request"));
         };
         const onClose = () => {
           cleanup();
-          this.tripCircuit();
           reject(new Error("WS-Close während Request"));
         };
         const cleanup = () => {
@@ -209,7 +202,6 @@ class StreamSession {
           ws.send(bytes);
         } catch (e: any) {
           cleanup();
-          this.tripCircuit();
           this.closeSocket();
           reject(new Error(`WS-Send-Fehler: ${e?.message ?? e}`));
         }
@@ -219,23 +211,29 @@ class StreamSession {
 
   /**
    * Sendet die ganze Ayah-Audio und ruft `onProgress` für JEDES eingehende
-   * Server-Frame (start / word / done). Aufloest mit dem Done-Event; Fehler
-   * -> reject, Client fällt in HTTP-Wort-Fallback zurück (via api.assessAudioHttp).
+   * Server-Frame (start / word / done). Aufloest mit dem Done-Event UND
+   * einer Client-Timing-Aufschluesselung fuer Diagnose. Fehler -> reject,
+   * Aufrufer zeigt einen Fehlerzustand an.
    */
   assessAyah(
     uri: string,
     ayahText: string,
     onProgress: (ev: AyahProgress) => void,
-  ): Promise<AyahDoneEvent> {
-    if (this.isCircuitOpen()) return Promise.reject(new Error("WS-Circuit offen"));
-
+  ): Promise<{ done: AyahDoneEvent; client: AyahClientTimings }> {
     return this.enqueue(async () => {
+      useDebug.getState().push("ws_ayah_start", `Ayah senden (${ayahText.slice(0, 30)}…)`);
       const ws = await this.connect();
-      const bytes = await readUriAsArrayBuffer(uri);
 
-      return await new Promise<AyahDoneEvent>((resolve, reject) => {
+      const tRead0 = Date.now();
+      const bytes = await readUriAsArrayBuffer(uri);
+      const bytes_read_ms = Date.now() - tRead0;
+
+      return await new Promise<{ done: AyahDoneEvent; client: AyahClientTimings }>((resolve, reject) => {
+        let ws_send_ms = 0;
+        let tSend = 0;
+        let first_frame_ms = 0;
+
         const to = setTimeout(() => {
-          this.tripCircuit();
           this.closeSocket();
           reject(new Error("WS-Ayah-Timeout"));
         }, AYAH_TIMEOUT_MS);
@@ -246,9 +244,15 @@ class StreamSession {
             if (data?.ping) return;
             if (data?.error) {
               cleanup();
-              this.tripCircuit();
+              useDebug.getState().push("ws_error", `Server-Error: ${data.error}`);
               reject(new Error(String(data.error)));
               return;
+            }
+            if (!first_frame_ms && (data?.kind === "start" || data?.kind === "word" || data?.kind === "done")) {
+              first_frame_ms = Date.now() - tSend;
+              useDebug.getState().push("ws_ayah_first",
+                `Erstes Frame nach ${first_frame_ms}ms`,
+                { kind: data.kind });
             }
             if (data?.kind === "start" || data?.kind === "word") {
               onProgress(data as AyahProgress);
@@ -256,26 +260,54 @@ class StreamSession {
             }
             if (data?.kind === "done") {
               onProgress(data as AyahProgress);
+              const last_frame_ms = Date.now() - tSend;
               cleanup();
-              this.resetCircuit();
-              resolve(data as AyahDoneEvent);
+              const client: AyahClientTimings = {
+                bytes_read_ms,
+                ws_send_ms,
+                first_frame_ms,
+                last_frame_ms,
+                bytes: bytes.byteLength,
+              };
+              const done = data as AyahDoneEvent;
+              // Struktur-Log fuer Metro-Terminal
+              // eslint-disable-next-line no-console
+              console.log(
+                "[AYAH]",
+                `bytes=${client.bytes}`,
+                `read=${bytes_read_ms}ms`,
+                `send=${ws_send_ms}ms`,
+                `first=${first_frame_ms}ms`,
+                `last=${last_frame_ms}ms`,
+                `server_total=${done.duration_ms}ms`,
+                done.timings ? `pre=${done.timings.preprocess_ms}ms asr=${done.timings.asr_ms}ms align=${done.timings.align_ms}ms score=${done.timings.score_ms}ms audio_ms=${done.timings.audio_ms}` : "",
+              );
+              useDebug.getState().push("ws_ayah_done",
+                `done ${last_frame_ms}ms (Server ${done.duration_ms}ms)`,
+                {
+                  bytes: client.bytes,
+                  read_ms: bytes_read_ms,
+                  first_ms: first_frame_ms,
+                  last_ms: last_frame_ms,
+                  server_ms: done.duration_ms,
+                  asr_ms: done.timings?.asr_ms ?? null,
+                  audio_ms: done.timings?.audio_ms ?? null,
+                });
+              resolve({ done, client });
               return;
             }
           } catch (e: any) {
             cleanup();
-            this.tripCircuit();
             reject(new Error(`JSON-Parse: ${e?.message ?? e}`));
           }
         };
         const onErr = () => {
           cleanup();
-          this.tripCircuit();
           this.closeSocket();
           reject(new Error("WS-Error während Ayah-Request"));
         };
         const onClose = () => {
           cleanup();
-          this.tripCircuit();
           reject(new Error("WS-Close während Ayah-Request"));
         };
         const cleanup = () => {
@@ -290,11 +322,13 @@ class StreamSession {
         ws.addEventListener("close", onClose as any);
 
         try {
+          const tSendStart = Date.now();
           ws.send(JSON.stringify({ mode: "ayah", ayah: ayahText }));
           ws.send(bytes);
+          tSend = Date.now();
+          ws_send_ms = tSend - tSendStart;
         } catch (e: any) {
           cleanup();
-          this.tripCircuit();
           this.closeSocket();
           reject(new Error(`WS-Send-Fehler: ${e?.message ?? e}`));
         }

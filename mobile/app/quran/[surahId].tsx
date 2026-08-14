@@ -22,11 +22,15 @@ import {
   getStreamSession,
   type AyahProgress,
   type AyahWordEvent,
+  type AyahClientTimings,
+  type AyahDoneEvent,
 } from "@/lib/stream";
-import { assessAudioHttp } from "@/lib/api";
 import { WordChip, type WordChipState } from "@/components/WordChip";
 import { PulsingMic } from "@/components/PulsingMic";
 import { StarBurst } from "@/components/StarBurst";
+import { DebugOverlay } from "@/components/DebugOverlay";
+import { NetworkStatusBadge } from "@/components/NetworkStatusBadge";
+import { useDebug } from "@/store/useDebug";
 
 type Phase = "idle" | "tts" | "listening" | "scoring" | "result" | "error";
 
@@ -40,11 +44,23 @@ function stateFromScore(score: number): WordChipState {
   return "bad";
 }
 
+function DiagLine({
+  label, value, extra, bold, muted,
+}: { label: string; value: string; extra?: string; bold?: boolean; muted?: boolean }) {
+  return (
+    <View style={styles.diagRow}>
+      <Text style={[styles.diagLabel, muted && styles.diagMuted]}>{label}</Text>
+      <Text style={[styles.diagValue, bold && styles.diagBold, muted && styles.diagMuted]}>
+        {value}{extra ? `  · ${extra}` : ""}
+      </Text>
+    </View>
+  );
+}
+
 export default function QuranAyahScreen() {
   const { surahId } = useLocalSearchParams<{ surahId: string }>();
   const router = useRouter();
   const backendUrl = useBackend((s) => s.url);
-  const streaming  = useBackend((s) => s.streaming);
   const addResult  = useProgress((s) => s.addResult);
   const insets = useSafeAreaInsets();
 
@@ -62,6 +78,11 @@ export default function QuranAyahScreen() {
   const [errMsg, setErrMsg] = useState<string | null>(null);
   const [totalScore, setTotalScore] = useState<number | null>(null);
   const [serverMs, setServerMs] = useState<number | null>(null);
+  const [timings, setTimings] = useState<{
+    done?: AyahDoneEvent;
+    client?: AyahClientTimings;
+    mode: "ws" | null;
+  }>({ mode: null });
 
   // wordStates: parallel zu ayah.words, Zustand + optional Score
   const [wordStates, setWordStates] = useState<
@@ -73,14 +94,14 @@ export default function QuranAyahScreen() {
 
   // Beim Screen-Mount: WS vorwaermen (spart 300-500ms bei der ersten Ayah).
   useEffect(() => {
-    if (backendUrl && streaming) {
+    if (backendUrl) {
       getStreamSession(backendUrl).warmUp();
     }
     return () => {
       stopSpeaking();
       if (nextTimer.current) clearTimeout(nextTimer.current);
     };
-  }, [backendUrl, streaming]);
+  }, [backendUrl]);
 
   // Bei Wechsel der Ayah: States zuruecksetzen.
   useEffect(() => {
@@ -89,6 +110,7 @@ export default function QuranAyahScreen() {
     setErrMsg(null);
     setTotalScore(null);
     setServerMs(null);
+    setTimings({ mode: null });
     setWordStates(ayah.words.map(() => ({ state: "pending" })));
     doneOnceRef.current = false;
   }, [ayah]);
@@ -96,6 +118,7 @@ export default function QuranAyahScreen() {
   // ------- Aufnahme + Bewertung -------
   const onRecordingStop = useCallback(async (uri: string | null) => {
     if (!ayah) return;
+    useDebug.getState().push("rec_stop", uri ? `Aufnahme fertig ${uri.split("/").pop()}` : "Aufnahme leer");
     if (!uri) {
       setErrMsg("Keine Aufnahme empfangen.");
       setPhase("error");
@@ -126,63 +149,34 @@ export default function QuranAyahScreen() {
       }
     };
 
-    // 1) WS-Weg mit progressivem Streaming
-    if (streaming && backendUrl) {
-      try {
-        const session = getStreamSession(backendUrl);
-        const done = await session.assessAyah(uri, ayahText, (ev: AyahProgress) => {
-          if (ev.kind === "word") applyWord(ev);
-        });
-        setTotalScore(done.total);
-        setServerMs(done.duration_ms);
-        setPhase("result");
-        if (Platform.OS !== "web") {
-          Haptics.notificationAsync(
-            done.total >= 75
-              ? Haptics.NotificationFeedbackType.Success
-              : Haptics.NotificationFeedbackType.Warning,
-          ).catch(() => {});
-        }
-        return;
-      } catch {
-        // stiller Fallback -> HTTP-Wort-fuer-Wort mit visuellem "Progress-Fake"
-      }
+    // WS-Weg mit progressivem Streaming (einziger Pfad, HTTP entfernt).
+    if (!backendUrl) {
+      setErrMsg("Backend-URL fehlt.");
+      setPhase("error");
+      return;
     }
-
-    // 2) HTTP-Fallback: Wort-fuer-Wort sequenziell scoren (langsamer, aber tut es).
     try {
-      let sum = 0;
-      let n = 0;
-      const t0 = Date.now();
-      for (let i = 0; i < ayah.words.length; i++) {
-        try {
-          const r = await assessAudioHttp(backendUrl, uri, ayah.words[i].ar);
-          applyWord({
-            kind: "word",
-            word_idx: i,
-            target: r.target,
-            score: r.total,
-            units: r.units,
-          });
-          sum += r.total;
-          n++;
-        } catch {
-          setWordStates((prev) => {
-            const next = [...prev];
-            next[i] = { state: "bad", score: 0 };
-            return next;
-          });
-        }
-      }
-      const total = n > 0 ? sum / n : 0;
-      setTotalScore(total);
-      setServerMs(Date.now() - t0);
+      const session = getStreamSession(backendUrl);
+      const { done, client } = await session.assessAyah(uri, ayahText, (ev: AyahProgress) => {
+        if (ev.kind === "word") applyWord(ev);
+      });
+      setTotalScore(done.total);
+      setServerMs(done.duration_ms);
+      setTimings({ done, client, mode: "ws" });
       setPhase("result");
+      if (Platform.OS !== "web") {
+        Haptics.notificationAsync(
+          done.total >= 75
+            ? Haptics.NotificationFeedbackType.Success
+            : Haptics.NotificationFeedbackType.Warning,
+        ).catch(() => {});
+      }
     } catch (e: any) {
-      setErrMsg(e?.message ?? "Netzwerkfehler.");
+      useDebug.getState().push("ws_error", `WS gescheitert: ${e?.message ?? e}`);
+      setErrMsg(e?.message ?? "WebSocket-Fehler.");
       setPhase("error");
     }
-  }, [ayah, backendUrl, streaming, surah, addResult]);
+  }, [ayah, backendUrl, surah, addResult]);
 
   const rec = useAyahRecorder(onRecordingStop);
 
@@ -193,6 +187,7 @@ export default function QuranAyahScreen() {
     setServerMs(null);
     setWordStates(ayah.words.map(() => ({ state: "pending" })));
     setPhase("listening");
+    useDebug.getState().push("rec_start", `Ayah ${ayah.n} · ${ayah.words.length} Wörter`);
     rec.start();
   }, [ayah, rec]);
 
@@ -283,6 +278,8 @@ export default function QuranAyahScreen() {
         <View style={[styles.progressFill, { width: `${percent}%` }]} />
       </View>
 
+      <NetworkStatusBadge />
+
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={[styles.scrollContent, { paddingBottom: insets.bottom + 24 }]}
@@ -347,9 +344,54 @@ export default function QuranAyahScreen() {
                  totalScore >= 75 ? "Sehr gut!"     :
                  totalScore >= 50 ? "Noch mal üben." : "Versuch es nochmal."}
               </Text>
-              {serverMs != null && (
-                <Text style={styles.metaText}>
-                  {streaming ? "⚡ Live-Streaming" : "HTTP"} · {serverMs} ms
+              <View style={styles.modeRow}>
+                <View style={[
+                  styles.modeChip,
+                  timings.mode === "ws" ? styles.modeChipWs : styles.modeChipUnknown,
+                ]}>
+                  <Text style={styles.modeChipText}>
+                    {timings.mode === "ws" ? "⚡ WebSocket-Stream" : "?"}
+                  </Text>
+                </View>
+                {serverMs != null && (
+                  <Text style={styles.metaText}>Server {serverMs} ms</Text>
+                )}
+              </View>
+
+              {/* Latenz-Analyse — immer sichtbar wenn irgendein Timing da ist */}
+              {(timings.client || timings.done?.timings) && (
+                <View style={styles.diagBox}>
+                  <Text style={styles.diagTitle}>Latenz-Analyse</Text>
+                  <DiagLine label="Modus"                value={timings.mode ?? "?"} bold />
+                  {timings.client && (
+                    <>
+                      <DiagLine label="Audio (Handy → Bytes)"    value={`${timings.client.bytes_read_ms} ms`} extra={`${Math.round((timings.client.bytes ?? 0) / 1024)} KB`} />
+                      <DiagLine label="WS send-Aufruf"           value={`${timings.client.ws_send_ms} ms`} />
+                      <DiagLine label="→ Erstes Server-Frame"    value={`${timings.client.first_frame_ms} ms`} bold />
+                      <DiagLine label="→ Letztes Frame (done)"   value={`${timings.client.last_frame_ms} ms`} bold />
+                    </>
+                  )}
+                  {timings.done?.timings && (
+                    <>
+                      <DiagLine label="Audio-Länge (Kind spricht)" value={`${timings.done.timings.audio_ms ?? "?"} ms`} />
+                      <DiagLine label="Bytes empfangen (Server)"   value={`${timings.done.timings.bytes_recv_ms ?? "?"} ms`} />
+                      <DiagLine label="Preprocess (CPU)"           value={`${timings.done.timings.preprocess_ms} ms`} />
+                      <DiagLine label="ASR (GPU)"                  value={`${timings.done.timings.asr_ms} ms`} bold />
+                      <DiagLine label="Forced-Align"               value={`${timings.done.timings.align_ms} ms`} />
+                      <DiagLine label="Wort-Scoring"               value={`${timings.done.timings.score_ms} ms`} />
+                    </>
+                  )}
+                  {!timings.done?.timings && (
+                    <Text style={styles.diagMutedNote}>
+                      Server-Timings fehlen — vermutlich WS-Fehler vor dem done-Frame.
+                    </Text>
+                  )}
+                </View>
+              )}
+
+              {!timings.client && !timings.done?.timings && (
+                <Text style={styles.diagMutedNote}>
+                  Keine Timings verfügbar (weder Client noch Server).
                 </Text>
               )}
             </View>
@@ -362,6 +404,9 @@ export default function QuranAyahScreen() {
           )}
         </View>
       </ScrollView>
+
+      {/* Debug-Overlay: zeigt Modus + letzte Events, antippen für Detail-Log */}
+      <DebugOverlay />
 
       {/* Aktions-Leiste */}
       <View style={[styles.actionBar, { paddingBottom: 12 + insets.bottom }]}>
@@ -504,7 +549,53 @@ const styles = StyleSheet.create({
     fontSize: 56, fontWeight: "900", color: "#0f172a", letterSpacing: -1,
   },
   scoreLabel: { fontSize: 16, fontWeight: "600", color: "#334155", marginTop: 4 },
-  metaText: { fontSize: 11, color: "#94a3b8", marginTop: 10, fontWeight: "600" },
+  metaText: { fontSize: 11, color: "#94a3b8", marginTop: 4, fontWeight: "600" },
+
+  modeRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginTop: 10,
+  },
+  modeChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  modeChipWs:      { backgroundColor: "#ecfeff", borderColor: "#67e8f9" },
+  modeChipHttp:    { backgroundColor: "#fef3c7", borderColor: "#fbbf24" },
+  modeChipUnknown: { backgroundColor: "#f1f5f9", borderColor: "#cbd5e1" },
+  modeChipText:    { fontSize: 12, fontWeight: "800", color: "#0f172a" },
+  diagMutedNote: { color: "#94a3b8", fontStyle: "italic", fontSize: 11, marginTop: 6, textAlign: "center" },
+
+  diagBox: {
+    marginTop: 16,
+    width: "100%",
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: "#f8fafc",
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    gap: 4,
+  },
+  diagTitle: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#0f172a",
+    marginBottom: 6,
+    letterSpacing: 0.5,
+    textTransform: "uppercase",
+  },
+  diagRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  diagLabel: { fontSize: 12, color: "#475569", flexShrink: 1 },
+  diagValue: { fontSize: 12, color: "#0f172a", fontVariant: ["tabular-nums"], fontWeight: "600" },
+  diagBold: { fontWeight: "800" },
+  diagMuted: { color: "#94a3b8", fontStyle: "italic" },
 
   actionBar: {
     flexDirection: "row",

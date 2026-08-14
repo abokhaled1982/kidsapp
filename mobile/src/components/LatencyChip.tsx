@@ -15,10 +15,7 @@ export function LatencyChip({
   serverMs?: number;
 }) {
   if (!meta) return null;
-  const modeLabel =
-    meta.mode === "ws" ? "⚡ WebSocket" :
-    meta.mode === "http-fallback" ? "↩︎ HTTP-Fallback" :
-    "🐢 HTTP";
+  const modeLabel = "⚡ WebSocket";
   const netMs = serverMs !== undefined ? Math.max(0, meta.totalMs - serverMs) : undefined;
   return (
     <View style={styles.wrap}>

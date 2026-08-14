@@ -1,18 +1,16 @@
 import { useState } from "react";
-import { View, Text, TextInput, Pressable, KeyboardAvoidingView, Platform, Switch, StyleSheet, ScrollView } from "react-native";
+import { View, Text, TextInput, Pressable, KeyboardAvoidingView, Platform, StyleSheet, ScrollView } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useBackend } from "@/store/useBackend";
-import { pingHealth, fetchHealth } from "@/lib/api";
+import { pingHealth } from "@/lib/api";
 import { closeStreamSession, StreamSession } from "@/lib/stream";
 
 export default function SettingsScreen() {
   const router = useRouter();
   const savedUrl = useBackend((s) => s.url);
-  const streaming = useBackend((s) => s.streaming);
   const setUrl = useBackend((s) => s.setUrl);
-  const setStreaming = useBackend((s) => s.setStreaming);
   const [draft, setDraft] = useState(savedUrl);
   const [check, setCheck] = useState<"idle" | "checking" | "ok" | "fail">("idle");
   const [diag, setDiag] = useState<string | null>(null);
@@ -27,31 +25,19 @@ export default function SettingsScreen() {
   };
 
   const runDiagnostic = async () => {
-    setDiag("Prüfe /health …");
-    const h = await fetchHealth(draft || savedUrl);
-    if (!h.ok) {
-      setDiag(`❌ Backend nicht erreichbar: ${h.error ?? "unbekannt"}`);
-      return;
+    const url = draft || savedUrl;
+    if (!url) { setDiag("❌ Keine Backend-URL gesetzt."); return; }
+    setDiag("Verbinde WebSocket …");
+    const s = new StreamSession(url);
+    const t0 = Date.now();
+    try {
+      await s.ensureConnected();
+      setDiag(`✅ WebSocket verbunden in ${Date.now() - t0} ms\n   ${url.replace(/^http/, "ws")}/stream`);
+    } catch (e: any) {
+      setDiag(`❌ WebSocket-Fehler: ${e?.message ?? e}`);
+    } finally {
+      s.close();
     }
-    let out = `✅ Backend online\n`;
-    out += `   Modell: ${h.model ?? "?"}\n`;
-    out += `   Device: ${h.device ?? "?"}\n`;
-    out += `   /stream-Endpoint: ${h.hasStream ? "✅ vorhanden" : "❌ FEHLT – Colab neu starten!"}\n`;
-
-    if (h.hasStream) {
-      setDiag(out + `\nTeste WebSocket …`);
-      const s = new StreamSession(draft || savedUrl);
-      const t0 = Date.now();
-      try {
-        await s.ensureConnected();
-        out += `\n✅ WebSocket verbunden in ${Date.now() - t0} ms`;
-      } catch (e: any) {
-        out += `\n❌ WebSocket-Fehler: ${e?.message ?? e}`;
-      } finally {
-        s.close();
-      }
-    }
-    setDiag(out);
   };
 
   const btnLabel =
@@ -74,7 +60,7 @@ export default function SettingsScreen() {
           <TextInput
             value={draft}
             onChangeText={setDraft}
-            placeholder="https://xxxx.trycloudflare.com"
+            placeholder="https://xxxx.ngrok-free.app"
             placeholderTextColor="#94a3b8"
             autoCapitalize="none"
             autoCorrect={false}
@@ -82,7 +68,7 @@ export default function SettingsScreen() {
             style={styles.input}
           />
           <Text style={styles.hint}>
-            Aus dem Colab-Notebook. Endet auf .trycloudflare.com.
+            Aus dem Colab-Notebook. Endet auf .ngrok-free.app.
           </Text>
 
           <Pressable onPress={save} style={styles.saveBtn}>
@@ -92,18 +78,13 @@ export default function SettingsScreen() {
 
           <View style={styles.toggleCard}>
             <View style={{ flex: 1 }}>
-              <Text style={styles.toggleTitle}>⚡ Streaming-Modus</Text>
+              <Text style={styles.toggleTitle}>⚡ WebSocket-Modus</Text>
               <Text style={styles.toggleHint}>
-                Bewertung über eine persistente WebSocket-Verbindung. Spart ~500 ms pro Wort
-                gegenüber HTTP. Bei Verbindungsproblemen wird automatisch auf HTTP zurückgefallen.
+                Bewertung läuft über eine persistente WebSocket-Verbindung.
+                HTTP wurde entfernt — fällt der Tunnel aus, zeigt die App eine
+                Fehlermeldung an.
               </Text>
             </View>
-            <Switch
-              value={streaming}
-              onValueChange={(v) => { setStreaming(v); closeStreamSession(); }}
-              trackColor={{ true: "#22c55e", false: "#cbd5e1" }}
-              thumbColor="#ffffff"
-            />
           </View>
 
           <Pressable onPress={runDiagnostic} style={styles.diagBtn}>
