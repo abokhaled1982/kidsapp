@@ -11,6 +11,9 @@ export type AssessUnit = {
   confidence: number;
   llr?: number | null;
   error_hint?: string | null;
+  articulation?: number;
+  tajweed?: number;
+  duration_ms?: number;
 };
 
 export type ServerWordTimings = {

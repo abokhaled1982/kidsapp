@@ -236,6 +236,91 @@ class ASR:
             "NFC", "".join(c for c in nfd if c not in self._TASHKEEL)
         )
 
+    def _analyze_target(self, word_original: str):
+        """Parst Original-Wort (mit Diakritika) und liefert pro Konsonant seine
+        Tashkeel-Marker. Ergebnis-Length == len(_strip_diacritics(word_original)).
+
+        Jeder Eintrag: {char, shadda, sukun, madd}.
+        - shadda = Verdopplung des Konsonanten (~2x Frame-Dauer erwartet).
+        - sukun  = kein Vokal (~kurze Frame-Dauer erwartet).
+        - madd   = Vokal-Verlaengerung: aktuelles Zeichen ist ا/و/ي und der
+                   vorherige Konsonant hat den passenden Kurzvokal
+                   (Fatha->ا, Kasra->ي, Damma->و). Erwartet lange Dauer.
+        """
+        # NFC -> NFD damit Kombinationszeichen separat auftauchen
+        nfd = self.unicodedata.normalize("NFD", word_original)
+        letters = []           # Liste von {char, marks:set}
+        for ch in nfd:
+            if ch in self._TASHKEEL:
+                if letters:
+                    letters[-1]["marks"].add(ch)
+            else:
+                letters.append({"char": ch, "marks": set()})
+        result = []
+        for i, item in enumerate(letters):
+            ch = item["char"]
+            marks = item["marks"]
+            has_shadda = "ّ" in marks
+            has_sukun  = "ْ" in marks
+            is_madd    = False
+            if i > 0 and ch in "اويٰ":
+                prev_marks = letters[i - 1]["marks"]
+                if ch in "اٰ" and "َ" in prev_marks:
+                    is_madd = True
+                elif ch == "ي" and "ِ" in prev_marks:
+                    is_madd = True
+                elif ch == "و" and "ُ" in prev_marks:
+                    is_madd = True
+            result.append({
+                "char": ch, "shadda": has_shadda,
+                "sukun": has_sukun, "madd": is_madd,
+            })
+        return result
+
+    def _tajweed_for_letter(self, run_len: int, mean_len: float, meta: dict):
+        """Duration-basierte Tashkeel/Tajweed-Bewertung fuer 1 Buchstaben.
+
+        Kombiniert absolute Frame-Schwellen (robust gegen Sprechtempo) mit
+        relativen Median-Vergleichen. 1 Frame ~ 20ms bei wav2vec2.
+
+        Grenzen (fundamental):
+          - Fatha/Kasra/Damma sind vom ASR-Modell nicht unterscheidbar.
+          - Nur Duration-Signale (Shadda, Sukun, Madd) sind erkennbar.
+        """
+        if run_len <= 0:
+            return 0.0, None
+        ratio = run_len / max(mean_len, 1.0)
+
+        # Shadda: Verdopplung -> lang. Absolut >=6 Frames (120ms) UND ratio>=1.6.
+        if meta.get("shadda"):
+            if run_len >= 6 and ratio >= 1.6:
+                return 100.0, None
+            # Kombinierter Penalty: je weiter unter Schwelle, desto niedriger.
+            frame_score = float(self.np.clip(run_len / 6.0 * 100.0, 0, 100))
+            ratio_score = float(self.np.clip((ratio - 0.8) / 0.8 * 100.0, 0, 100))
+            score = min(frame_score, ratio_score)
+            return score, ("shadda_fehlt" if score < 70 else None)
+
+        # Sukun: kein Vokal -> kurz. Absolut <=3 Frames (60ms) UND ratio<=0.7.
+        if meta.get("sukun"):
+            if run_len <= 3 and ratio <= 0.7:
+                return 100.0, None
+            # Je laenger, desto schlechter (Vokal wurde hinzugefuegt).
+            frame_score = float(self.np.clip((6 - run_len) / 3.0 * 100.0, 0, 100))
+            ratio_score = float(self.np.clip((1.2 - ratio) / 0.5 * 100.0, 0, 100))
+            score = min(frame_score, ratio_score)
+            return score, ("sukun_ignoriert" if score < 70 else None)
+
+        # Madd: Vokal-Verlaengerung. Absolut >=6 Frames (120ms).
+        if meta.get("madd"):
+            if run_len >= 6:
+                return 100.0, None
+            score = float(self.np.clip(run_len / 6.0 * 100.0, 0, 100))
+            return score, ("madd_zu_kurz" if score < 70 else None)
+
+        # Neutral: kein spezielles Zeichen -> voller Tajweed-Score.
+        return 100.0, None
+
     def _equiv_ids(self, ch: str, pos: int, total: int):
         if pos == 0 and ch in self._START_EQUIV:
             alts = self._START_EQUIV[ch]
@@ -291,7 +376,7 @@ class ASR:
     def _sigmoid(self, x: float) -> float:
         return 1.0 / (1.0 + float(self.np.exp(-x)))
 
-    def _gop_score(self, log_probs, target_word: str):
+    def _gop_score(self, log_probs, target_word: str, phon_meta=None):
         np = self.np
         target_ids = self._encode_target(target_word)
         if not target_ids:
@@ -302,11 +387,14 @@ class ASR:
         aligned, _ = self.AF.forced_align(log_probs, targets, blank=self.ASR_BLANK_ID)
         runs = self._runs_of_non_blank(aligned[0].tolist())
         total_len = len(target_word)
+        run_lens = [len(r) for r in runs] if runs else [1]
+        mean_len = float(np.median(run_lens)) if run_lens else 1.0
         results = []
         for i, ch in enumerate(target_word):
             if i >= len(runs):
                 results.append({"label": ch, "score": 0.0, "confidence": 0.0,
-                                "llr": -5.0, "error_hint": None})
+                                "llr": -5.0, "error_hint": None,
+                                "articulation": 0.0, "tajweed": 0.0, "duration_ms": 0})
                 continue
             frames = runs[i]
             lp_frame = log_probs[0, frames]
@@ -330,13 +418,26 @@ class ASR:
             else:
                 llr, llr_score, error_hint = 5.0, 100.0, None
 
-            final = 0.4 * post_score + 0.6 * llr_score
+            articulation = 0.4 * post_score + 0.6 * llr_score
+
+            # Tashkeel / Tajweed via Frame-Dauer
+            meta_i = phon_meta[i] if (phon_meta and i < len(phon_meta)) else {}
+            tajweed_score, tajweed_hint = self._tajweed_for_letter(
+                len(frames), mean_len, meta_i)
+
+            # Konsonant-Fehler-Hint hat Vorrang, sonst Tajweed-Hint
+            hint_final = error_hint if error_hint else tajweed_hint
+
+            final = 0.75 * articulation + 0.25 * tajweed_score
             results.append({
                 "label": ch,
                 "score": float(np.clip(final, 0, 100)),
                 "confidence": conf,
                 "llr": float(llr),
-                "error_hint": error_hint,
+                "error_hint": hint_final,
+                "articulation": float(np.clip(articulation, 0, 100)),
+                "tajweed": float(np.clip(tajweed_score, 0, 100)),
+                "duration_ms": int(len(frames) * 20),
             })
         return results
 
@@ -357,13 +458,14 @@ class ASR:
         dt_pre = int((self.time.perf_counter() - t_pre) * 1000)
 
         target_clean = self._strip_diacritics(target)
+        phon_meta = self._analyze_target(target)
 
         t_asr = self.time.perf_counter()
         log_probs, transcription = self._run_asr(wav)
         dt_asr = int((self.time.perf_counter() - t_asr) * 1000)
 
         t_score = self.time.perf_counter()
-        units = self._gop_score(log_probs, target_clean)
+        units = self._gop_score(log_probs, target_clean, phon_meta=phon_meta)
         total = float(self.np.mean([u["score"] for u in units])) if units else 0.0
         dt_score = int((self.time.perf_counter() - t_score) * 1000)
 
@@ -394,9 +496,14 @@ class ASR:
         if not raw_words:
             raise HTTPException(400, "Ayah-Text leer.")
         words_clean = [self._strip_diacritics(w) for w in raw_words]
+        # Original-Woerter parallel behalten fuer Tashkeel-/Tajweed-Analyse.
+        raw_words_kept = [orig for orig, clean in zip(raw_words, words_clean) if clean]
         words_clean = [w for w in words_clean if w]
         if not words_clean:
             raise HTTPException(400, "Ayah-Text enthaelt keine bewertbaren Zeichen.")
+
+        # Tashkeel-Analyse pro Wort (Reihenfolge synchron zu words_clean).
+        phon_meta_per_word = [self._analyze_target(w) for w in raw_words_kept]
 
         all_chars, word_spans = [], []
         for w in words_clean:
@@ -441,16 +548,21 @@ class ASR:
         }
 
         t_score = self.time.perf_counter()
+        # Median-Framedauer aller Buchstaben als Referenz fuer Tashkeel-Checks.
+        run_lens_all = [len(r) for r in runs] if runs else [1]
+        mean_len_ayah = float(np.median(run_lens_all)) if run_lens_all else 1.0
         per_word_scores = []
         for wi, (start_c, end_c) in enumerate(word_spans):
             word = words_clean[wi]
             word_len = end_c - start_c
+            phon_meta_word = phon_meta_per_word[wi] if wi < len(phon_meta_per_word) else []
             char_units = []
             for local_i, char_global_i in enumerate(range(start_c, end_c)):
                 ch = all_chars[char_global_i]
                 if char_global_i >= len(runs):
                     char_units.append({"label": ch, "score": 0.0, "confidence": 0.0,
-                                       "llr": -5.0, "error_hint": None})
+                                       "llr": -5.0, "error_hint": None,
+                                       "articulation": 0.0, "tajweed": 0.0, "duration_ms": 0})
                     continue
                 frames = runs[char_global_i]
                 lp_frame = log_probs[0, frames]
@@ -473,13 +585,21 @@ class ASR:
                 else:
                     llr, llr_score, error_hint = 5.0, 100.0, None
 
-                final = 0.4 * post_score + 0.6 * llr_score
+                articulation = 0.4 * post_score + 0.6 * llr_score
+                meta_i = phon_meta_word[local_i] if local_i < len(phon_meta_word) else {}
+                tajweed_score, tajweed_hint = self._tajweed_for_letter(
+                    len(frames), mean_len_ayah, meta_i)
+                hint_final = error_hint if error_hint else tajweed_hint
+                final = 0.75 * articulation + 0.25 * tajweed_score
                 char_units.append({
                     "label": ch,
                     "score": float(np.clip(final, 0, 100)),
                     "confidence": conf,
                     "llr": float(llr),
-                    "error_hint": error_hint,
+                    "error_hint": hint_final,
+                    "articulation": float(np.clip(articulation, 0, 100)),
+                    "tajweed": float(np.clip(tajweed_score, 0, 100)),
+                    "duration_ms": int(len(frames) * 20),
                 })
 
             char_scores = [u["score"] for u in char_units]
