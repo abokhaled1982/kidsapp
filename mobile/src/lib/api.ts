@@ -31,9 +31,10 @@ export async function assessAudioSmart(
   backendUrl: string,
   uri: string,
   target: string,
+  token: string = "",
 ): Promise<AssessResponse & { _meta: AssessMeta }> {
   const t0 = Date.now();
-  const session = getStreamSession(backendUrl);
+  const session = getStreamSession(backendUrl, token);
   const r = await session.assessWord(uri, target);
   return { ...r, _meta: { mode: "ws", totalMs: Date.now() - t0 } };
 }
@@ -49,13 +50,13 @@ export type HealthInfo = {
   error?: string;
 };
 
-export async function pingHealth(url: string): Promise<boolean> {
-  return (await fetchHealth(url)).ok;
+export async function pingHealth(url: string, token: string = ""): Promise<boolean> {
+  return (await fetchHealth(url, token)).ok;
 }
 
-export async function fetchHealth(url: string): Promise<HealthInfo> {
+export async function fetchHealth(url: string, token: string = ""): Promise<HealthInfo> {
   if (!url) return { ok: false, hasStream: false, error: "keine URL" };
-  const s = new StreamSession(url);
+  const s = new StreamSession(url, token);
   const t0 = Date.now();
   try {
     await s.ensureConnected();

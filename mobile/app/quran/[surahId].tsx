@@ -61,6 +61,7 @@ export default function QuranAyahScreen() {
   const { surahId } = useLocalSearchParams<{ surahId: string }>();
   const router = useRouter();
   const backendUrl = useBackend((s) => s.url);
+  const backendToken = useBackend((s) => s.token);
   const addResult  = useProgress((s) => s.addResult);
   const insets = useSafeAreaInsets();
 
@@ -95,13 +96,13 @@ export default function QuranAyahScreen() {
   // Beim Screen-Mount: WS vorwaermen (spart 300-500ms bei der ersten Ayah).
   useEffect(() => {
     if (backendUrl) {
-      getStreamSession(backendUrl).warmUp();
+      getStreamSession(backendUrl, backendToken).warmUp();
     }
     return () => {
       stopSpeaking();
       if (nextTimer.current) clearTimeout(nextTimer.current);
     };
-  }, [backendUrl]);
+  }, [backendUrl, backendToken]);
 
   // Bei Wechsel der Ayah: States zuruecksetzen.
   useEffect(() => {
@@ -156,7 +157,7 @@ export default function QuranAyahScreen() {
       return;
     }
     try {
-      const session = getStreamSession(backendUrl);
+      const session = getStreamSession(backendUrl, backendToken);
       const { done, client } = await session.assessAyah(uri, ayahText, (ev: AyahProgress) => {
         if (ev.kind === "word") applyWord(ev);
       });

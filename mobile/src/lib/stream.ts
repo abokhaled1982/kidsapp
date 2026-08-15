@@ -79,7 +79,7 @@ class StreamSession {
   private connecting: Promise<WebSocket> | null = null;
   private queue: Promise<any> = Promise.resolve();
 
-  constructor(private backendUrl: string) {}
+  constructor(private backendUrl: string, private token: string = "") {}
 
   /** Public convenience: baut die Verbindung auf und wartet auf OPEN. */
   ensureConnected(): Promise<void> {
@@ -104,7 +104,8 @@ class StreamSession {
     if (this.connecting) return this.connecting;
 
     this.connecting = new Promise<WebSocket>((resolve, reject) => {
-      const url = `${httpToWs(this.backendUrl)}/stream`;
+      const base = `${httpToWs(this.backendUrl)}/stream`;
+      const url = this.token ? `${base}?token=${encodeURIComponent(this.token)}` : base;
       let ws: WebSocket;
       try { ws = new WebSocket(url); }
       catch (e: any) { return reject(new Error(`WS-Konstruktor: ${e?.message ?? e}`)); }
@@ -341,13 +342,13 @@ class StreamSession {
   }
 }
 
-// Singleton-Cache pro Backend-URL. Wechsel der URL => alte Session schliessen.
-let cached: { url: string; session: StreamSession } | null = null;
+// Singleton-Cache pro (URL, Token). Wechsel eines der beiden => Session neu.
+let cached: { url: string; token: string; session: StreamSession } | null = null;
 
-export function getStreamSession(backendUrl: string): StreamSession {
-  if (!cached || cached.url !== backendUrl) {
+export function getStreamSession(backendUrl: string, token: string = ""): StreamSession {
+  if (!cached || cached.url !== backendUrl || cached.token !== token) {
     cached?.session.dispose();
-    cached = { url: backendUrl, session: new StreamSession(backendUrl) };
+    cached = { url: backendUrl, token, session: new StreamSession(backendUrl, token) };
   }
   return cached.session;
 }

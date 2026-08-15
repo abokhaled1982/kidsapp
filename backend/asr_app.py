@@ -63,7 +63,6 @@ image = (
 )
 
 app       = modal.App(APP_NAME)
-hf_volume = modal.Volume.from_name("quran-asr-hf-cache", create_if_missing=True)
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +72,6 @@ hf_volume = modal.Volume.from_name("quran-asr-hf-cache", create_if_missing=True)
 @app.cls(
     gpu="A10G",                       # ~60% schneller als L4 bei ~gleichem Preis.
     image=image,
-    volumes={HF_CACHE: hf_volume},
     secrets=[modal.Secret.from_name(AUTH_SECRET)],
     min_containers=2,                 # 2 warm -> Redundanz + kein Single-Point-of-Failure.
     max_containers=50,                # Autoscale-Cap (Kostenbremse).
@@ -82,7 +80,7 @@ hf_volume = modal.Volume.from_name("quran-asr-hf-cache", create_if_missing=True)
     timeout=600,
     region="eu",                      # Latenz-Region: EU. Fuer US-User -> "us-east".
 )
-@modal.concurrent(max_inputs=6, target_inputs=4)  # target<max -> smoother Autoscale.
+@modal.concurrent(max_inputs=1)  # 1 GPU-Forward pro Container -> keine Race auf Model-Weights.
 class ASR:
     @modal.enter()
     def load(self):
@@ -122,9 +120,6 @@ class ASR:
         self.ASR_VOCAB = self.asr_processor.tokenizer.get_vocab()
         self.ASR_BLANK_ID = self.asr_model.config.pad_token_id
         self.vad_model = load_silero_vad()
-
-        # HF-Cache persistieren
-        hf_volume.commit()
 
         # --- Warm-up (2s Null-Audio, damit CUDA-JIT nicht ersten Call bremst) -
         with torch.inference_mode():
@@ -500,14 +495,16 @@ class ASR:
         globals().update({
             "UploadFile": UploadFile,
             "WebSocket": WebSocket,
+            "Optional": Optional,
+            "str": str,
         })
 
         AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "").strip()
 
-        def require_bearer(authorization: Optional[str] = Header(default=None)) -> None:
+        def require_bearer(authorization: str = Header(default="")) -> None:
             if not AUTH_TOKEN:                              # Secret leer -> Auth aus.
                 return
-            if not authorization or not authorization.startswith("Bearer "):
+            if not authorization.startswith("Bearer "):
                 raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token")
             if authorization[len("Bearer "):].strip() != AUTH_TOKEN:
                 raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid bearer token")

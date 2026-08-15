@@ -10,25 +10,30 @@ import { closeStreamSession, StreamSession } from "@/lib/stream";
 export default function SettingsScreen() {
   const router = useRouter();
   const savedUrl = useBackend((s) => s.url);
+  const savedToken = useBackend((s) => s.token);
   const setUrl = useBackend((s) => s.setUrl);
+  const setToken = useBackend((s) => s.setToken);
   const [draft, setDraft] = useState(savedUrl);
+  const [draftToken, setDraftToken] = useState(savedToken);
   const [check, setCheck] = useState<"idle" | "checking" | "ok" | "fail">("idle");
   const [diag, setDiag] = useState<string | null>(null);
 
   const save = async () => {
     setUrl(draft);
+    setToken(draftToken);
     closeStreamSession();
     setCheck("checking");
-    const ok = await pingHealth(draft);
+    const ok = await pingHealth(draft, draftToken);
     setCheck(ok ? "ok" : "fail");
     if (ok) setTimeout(() => router.back(), 700);
   };
 
   const runDiagnostic = async () => {
     const url = draft || savedUrl;
+    const token = draftToken || savedToken;
     if (!url) { setDiag("❌ Keine Backend-URL gesetzt."); return; }
     setDiag("Verbinde WebSocket …");
-    const s = new StreamSession(url);
+    const s = new StreamSession(url, token);
     const t0 = Date.now();
     try {
       await s.ensureConnected();
@@ -60,7 +65,7 @@ export default function SettingsScreen() {
           <TextInput
             value={draft}
             onChangeText={setDraft}
-            placeholder="https://xxxx.ngrok-free.app"
+            placeholder="https://xxxx.modal.run"
             placeholderTextColor="#94a3b8"
             autoCapitalize="none"
             autoCorrect={false}
@@ -68,7 +73,22 @@ export default function SettingsScreen() {
             style={styles.input}
           />
           <Text style={styles.hint}>
-            Aus dem Colab-Notebook. Endet auf .ngrok-free.app.
+            Modal-Deployment (z. B. https://…--quran-asr-asr-web.modal.run).
+          </Text>
+
+          <Text style={[styles.label, { marginTop: 12 }]}>Auth-Token</Text>
+          <TextInput
+            value={draftToken}
+            onChangeText={setDraftToken}
+            placeholder="Bearer-Token vom Backend"
+            placeholderTextColor="#94a3b8"
+            autoCapitalize="none"
+            autoCorrect={false}
+            secureTextEntry
+            style={styles.input}
+          />
+          <Text style={styles.hint}>
+            Wird als ?token=… an /stream angehängt. Leer lassen, wenn Backend ohne Auth.
           </Text>
 
           <Pressable onPress={save} style={styles.saveBtn}>
