@@ -9,6 +9,7 @@ import { CATEGORIES, type CategoryId } from "@/data/categories";
 import { WORDS } from "@/data/words";
 import { speakArabic, stopSpeaking } from "@/lib/tts";
 import { assessAudioSmart, type AssessResponse, type AssessMeta } from "@/lib/api";
+import { getStreamSession } from "@/lib/stream";
 import { useAutoRecorder } from "@/hooks/useAutoRecorder";
 import { useBackend } from "@/store/useBackend";
 import { useProgress } from "@/store/useProgress";
@@ -89,6 +90,11 @@ export default function PlayScreen() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [idx, backendUrl]);
+
+  // WS beim Screen-Mount vorwaermen -> erstes Wort zahlt keinen Connect-Preis.
+  useEffect(() => {
+    if (backendUrl) getStreamSession(backendUrl, backendToken).warmUp();
+  }, [backendUrl, backendToken]);
 
   useEffect(() => {
     if (phase !== "result" || !result) return;
@@ -201,6 +207,33 @@ export default function PlayScreen() {
             </Text>
             <ScoreBar total={result.total} />
             <LatencyChip meta={meta ?? undefined} serverMs={result.duration_ms} />
+
+            {(meta?.client || result.timings) && (
+              <View style={styles.diagBox}>
+                <Text style={styles.diagTitle}>Latenz-Analyse</Text>
+                <DiagLine label="Modus" value="ws" bold />
+                {meta?.client && (
+                  <>
+                    <DiagLine
+                      label="Audio (Handy → Bytes)"
+                      value={`${meta.client.bytes_read_ms} ms`}
+                      extra={`${Math.round((meta.client.bytes ?? 0) / 1024)} KB`}
+                    />
+                    <DiagLine label="WS send-Aufruf" value={`${meta.client.ws_send_ms} ms`} />
+                    <DiagLine label="WS warm?" value={meta.client.warm ? "ja" : "nein (Connect)"} />
+                    <DiagLine label="→ Roundtrip (rtt)" value={`${meta.client.rtt_ms} ms`} bold />
+                  </>
+                )}
+                {result.timings && (
+                  <>
+                    <DiagLine label="Audio-Länge (Kind spricht)" value={`${result.timings.audio_ms ?? "?"} ms`} />
+                    <DiagLine label="Preprocess (CPU)" value={`${result.timings.preprocess_ms ?? "?"} ms`} />
+                    <DiagLine label="ASR (GPU)" value={`${result.timings.asr_ms ?? "?"} ms`} bold />
+                    <DiagLine label="Wort-Scoring" value={`${result.timings.score_ms ?? "?"} ms`} />
+                  </>
+                )}
+              </View>
+            )}
           </View>
         )}
       </ScrollView>
@@ -253,6 +286,19 @@ function ScoreBar({ total }: { total: number }) {
       </View>
       <Text style={{ textAlign: "center", fontSize: 16, fontWeight: "700", marginTop: 6 }}>
         {label} {t} / 100
+      </Text>
+    </View>
+  );
+}
+
+function DiagLine({
+  label, value, extra, bold,
+}: { label: string; value: string | number; extra?: string; bold?: boolean }) {
+  return (
+    <View style={styles.diagRow}>
+      <Text style={styles.diagLabel}>{label}</Text>
+      <Text style={[styles.diagValue, bold && styles.diagBold]}>
+        {value}{extra ? `  ·  ${extra}` : ""}
       </Text>
     </View>
   );
@@ -364,4 +410,31 @@ const styles = StyleSheet.create({
   footerSecondaryText: { color: "#334155", fontWeight: "700", fontSize: 16 },
   footerPrimary: { backgroundColor: "#22c55e" },
   footerPrimaryText: { color: "white", fontWeight: "700", fontSize: 16 },
+
+  diagBox: {
+    marginTop: 16,
+    width: "100%",
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: "#f8fafc",
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    gap: 4,
+  },
+  diagTitle: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#0f172a",
+    marginBottom: 6,
+    letterSpacing: 0.5,
+    textTransform: "uppercase",
+  },
+  diagRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  diagLabel: { fontSize: 12, color: "#475569", flexShrink: 1 },
+  diagValue: { fontSize: 12, color: "#0f172a", fontVariant: ["tabular-nums"], fontWeight: "600" },
+  diagBold: { fontWeight: "800" },
 });

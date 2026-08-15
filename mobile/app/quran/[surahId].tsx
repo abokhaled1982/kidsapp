@@ -192,12 +192,26 @@ export default function QuranAyahScreen() {
     rec.start();
   }, [ayah, rec]);
 
+  // Auto-Start: 500ms nach Ayah-Load lauscht die App automatisch. Kein Button noetig.
+  // Der Recorder wartet intern (useAyahRecorder) auf Sprach-Onset via VAD-Metering und
+  // stoppt automatisch bei 700ms Stille -> "ambient" UX, wie beim Wort-Modus.
+  useEffect(() => {
+    if (!ayah || !backendUrl) return;
+    if (phase !== "idle") return;
+    const t = setTimeout(() => {
+      if (phase === "idle") startRecord();
+    }, 500);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ayah, backendUrl, phase]);
+
   const listenTts = useCallback(() => {
-    if (!ayah || phase === "listening" || phase === "scoring") return;
+    if (!ayah || phase === "scoring") return;
+    if (phase === "listening") rec.stop();
     setPhase("tts");
     const t = ayah.words.map((w) => w.ar).join(" ");
     speakArabic(t, () => setPhase("idle"));
-  }, [ayah, phase]);
+  }, [ayah, phase, rec]);
 
   // Auto-Next bei sehr gutem Ergebnis
   useEffect(() => {
@@ -314,7 +328,7 @@ export default function QuranAyahScreen() {
         {/* Zustandsblock */}
         <View style={styles.phaseWrap}>
           {phase === "idle" && (
-            <Text style={styles.hint}>Tippe auf „Aufnehmen" und rezitiere die Ayah.</Text>
+            <Text style={styles.hint}>Ich höre gleich zu — rezitiere einfach los.</Text>
           )}
           {phase === "tts" && (
             <View style={styles.row}>
@@ -326,7 +340,10 @@ export default function QuranAyahScreen() {
             <>
               <PulsingMic active level={rec.level} />
               <Text style={[styles.hint, { color: "#ef4444", marginTop: 12 }]}>
-                Rezitiere die Ayah!
+                Ich höre dir zu…
+              </Text>
+              <Text style={[styles.hintSub, { marginTop: 4 }]}>
+                Ich stoppe automatisch, wenn du fertig bist.
               </Text>
             </>
           )}
@@ -436,25 +453,37 @@ export default function QuranAyahScreen() {
           <Text style={styles.secondaryText}>Anhören</Text>
         </Pressable>
 
-        <Pressable
-          onPress={phase === "listening" ? rec.stop : startRecord}
-          disabled={phase === "scoring" || phase === "tts"}
-          style={({ pressed }) => [
-            styles.primaryBtnBig,
-            (phase === "scoring" || phase === "tts") && styles.btnDisabled,
-            phase === "listening" && styles.primaryBtnStop,
-            pressed && styles.pressed,
-          ]}
-        >
-          <Ionicons
-            name={phase === "listening" ? "stop" : "mic"}
-            size={26}
-            color="#ffffff"
-          />
-          <Text style={styles.primaryBtnBigText}>
-            {phase === "listening" ? "Stopp" : "Aufnehmen"}
-          </Text>
-        </Pressable>
+        {phase === "listening" ? (
+          <Pressable
+            onPress={rec.stop}
+            style={({ pressed }) => [
+              styles.primaryBtnBig,
+              styles.primaryBtnStop,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Ionicons name="checkmark" size={26} color="#ffffff" />
+            <Text style={styles.primaryBtnBigText}>Fertig</Text>
+          </Pressable>
+        ) : phase === "result" || phase === "error" ? (
+          <Pressable
+            onPress={startRecord}
+            style={({ pressed }) => [
+              styles.primaryBtnBig,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Ionicons name="refresh" size={24} color="#ffffff" />
+            <Text style={styles.primaryBtnBigText}>Nochmal</Text>
+          </Pressable>
+        ) : (
+          <View style={[styles.primaryBtnBig, styles.primaryBtnQuiet]}>
+            <ActivityIndicator size="small" color="#94a3b8" />
+            <Text style={[styles.primaryBtnBigText, { color: "#94a3b8" }]}>
+              {phase === "tts" ? "Höre zu…" : phase === "scoring" ? "Bewertung…" : "Bereit"}
+            </Text>
+          </View>
+        )}
 
         <Pressable
           onPress={goNext}
@@ -544,6 +573,7 @@ const styles = StyleSheet.create({
   },
   row: { flexDirection: "row", alignItems: "center", gap: 8 },
   hint: { color: "#334155", fontSize: 15, textAlign: "center" },
+  hintSub: { color: "#64748b", fontSize: 12, textAlign: "center" },
 
   resultBlock: { alignItems: "center", position: "relative" },
   scoreBig: {
@@ -630,7 +660,8 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     backgroundColor: "#ef4444",
   },
-  primaryBtnStop: { backgroundColor: "#0f172a" },
+  primaryBtnStop: { backgroundColor: "#16a34a" },
+  primaryBtnQuiet: { backgroundColor: "#f1f5f9" },
   primaryBtnBigText: { color: "#ffffff", fontSize: 16, fontWeight: "800" },
   btnDisabled: { opacity: 0.4 },
 

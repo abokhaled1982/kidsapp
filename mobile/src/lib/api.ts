@@ -1,7 +1,7 @@
 // WebSocket-only Backend-Anbindung. HTTP-Pfade wurden entfernt -
 // Bewertung und Health-Check laufen ausschliesslich ueber /stream.
 
-import { getStreamSession, StreamSession } from "@/lib/stream";
+import { getStreamSession, StreamSession, type WordClientTimings } from "@/lib/stream";
 import { readUriAsArrayBuffer } from "@/lib/audioBytes";
 export { readUriAsArrayBuffer };
 
@@ -13,17 +13,28 @@ export type AssessUnit = {
   error_hint?: string | null;
 };
 
+export type ServerWordTimings = {
+  audio_bytes?: number;
+  audio_samples?: number;
+  audio_ms?: number;
+  preprocess_ms?: number;
+  asr_ms?: number;
+  score_ms?: number;
+};
+
 export type AssessResponse = {
   target: string;
   transcription: string;
   units: AssessUnit[];
   total: number;
   duration_ms: number;
+  timings?: ServerWordTimings;
 };
 
 export type AssessMeta = {
   mode: "ws";
   totalMs: number;
+  client?: WordClientTimings;
 };
 
 /** Einzelwort ueber die persistente WS-Session bewerten. */
@@ -35,8 +46,8 @@ export async function assessAudioSmart(
 ): Promise<AssessResponse & { _meta: AssessMeta }> {
   const t0 = Date.now();
   const session = getStreamSession(backendUrl, token);
-  const r = await session.assessWord(uri, target);
-  return { ...r, _meta: { mode: "ws", totalMs: Date.now() - t0 } };
+  const { response, client } = await session.assessWord(uri, target);
+  return { ...response, _meta: { mode: "ws", totalMs: Date.now() - t0, client } };
 }
 
 // --------------------------------------------------------------------------

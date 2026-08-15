@@ -68,6 +68,16 @@ export type AyahClientTimings = {
   bytes: number;
 };
 
+/** Analog fuer Einzelwort-Antworten. */
+export type WordClientTimings = {
+  connect_ms: number;
+  bytes_read_ms: number;
+  ws_send_ms: number;
+  rtt_ms: number;
+  bytes: number;
+  warm: boolean;
+};
+
 function httpToWs(url: string): string {
   if (!url) return url;
   if (url.startsWith("wss://") || url.startsWith("ws://")) return url;
@@ -151,12 +161,21 @@ class StreamSession {
     return run;
   }
 
-  assessWord(uri: string, target: string): Promise<AssessResponse> {
+  assessWord(uri: string, target: string): Promise<{ response: AssessResponse; client: WordClientTimings }> {
     return this.enqueue(async () => {
+      const tConn0 = Date.now();
       const ws = await this.connect();
-      const bytes = await readUriAsArrayBuffer(uri);
+      const wasWarm = ws.readyState === WebSocket.OPEN && Date.now() - tConn0 < 5;
+      const connect_ms = Date.now() - tConn0;
 
-      return await new Promise<AssessResponse>((resolve, reject) => {
+      const tRead0 = Date.now();
+      const bytes = await readUriAsArrayBuffer(uri);
+      const bytes_read_ms = Date.now() - tRead0;
+
+      return await new Promise<{ response: AssessResponse; client: WordClientTimings }>((resolve, reject) => {
+        let tSend = 0;
+        let ws_send_ms = 0;
+
         const to = setTimeout(() => {
           this.closeSocket();
           reject(new Error("WS-Request-Timeout"));
@@ -171,8 +190,34 @@ class StreamSession {
               reject(new Error(String(data.error)));
               return;
             }
+            const rtt_ms = Date.now() - tSend;
             cleanup();
-            resolve(data as AssessResponse);
+            const serverMs = typeof data?.duration_ms === "number" ? data.duration_ms : -1;
+            const net_ms = rtt_ms - serverMs;
+            // eslint-disable-next-line no-console
+            console.log(
+              "[WORD]",
+              `warm=${wasWarm ? "y" : "n"}`,
+              `connect=${connect_ms}ms`,
+              `bytes=${bytes.byteLength}`,
+              `read=${bytes_read_ms}ms`,
+              `send=${ws_send_ms}ms`,
+              `rtt=${rtt_ms}ms`,
+              `server=${serverMs}ms`,
+              `net_only=${net_ms >= 0 ? net_ms + "ms" : "?"}`,
+            );
+            useDebug.getState().push("ws_word",
+              `RTT ${rtt_ms}ms (Server ${serverMs}ms, Netz ${net_ms}ms)`,
+              { warm: wasWarm ? 1 : 0, connect_ms, read_ms: bytes_read_ms, send_ms: ws_send_ms, rtt_ms, server_ms: serverMs });
+            const client: WordClientTimings = {
+              connect_ms,
+              bytes_read_ms,
+              ws_send_ms,
+              rtt_ms,
+              bytes: bytes.byteLength,
+              warm: wasWarm,
+            };
+            resolve({ response: data as AssessResponse, client });
           } catch (e: any) {
             cleanup();
             reject(new Error(`JSON-Parse: ${e?.message ?? e}`));
@@ -199,8 +244,11 @@ class StreamSession {
         ws.addEventListener("close", onClose as any);
 
         try {
+          const tSendStart = Date.now();
           ws.send(JSON.stringify({ target }));
           ws.send(bytes);
+          tSend = Date.now();
+          ws_send_ms = tSend - tSendStart;
         } catch (e: any) {
           cleanup();
           this.closeSocket();

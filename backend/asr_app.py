@@ -169,10 +169,25 @@ class ASR:
 
     # ================== Audio-Preprocessing (1:1 aus Notebook) ================
     def _decode_audio(self, raw: bytes):
+        """Native decode via torchaudio (libtorio) - kein ffmpeg-Subprocess.
+
+        Fallback auf pydub (startet ffmpeg-Prozess) fuer Formate die libtorio
+        nicht kennt. Auf typischen Handy-Uploads (m4a/aac/wav) ~10x schneller
+        als pydub, weil kein Subprocess-Boot noetig ist.
+        """
         import io
-        seg = self.AudioSegment.from_file(io.BytesIO(raw))
-        seg = seg.set_frame_rate(self.SR).set_channels(1).set_sample_width(2)
-        return self.np.asarray(seg.get_array_of_samples(), dtype=self.np.float32) / 32768.0
+        try:
+            import torchaudio
+            wav_t, sr = torchaudio.load(io.BytesIO(raw))     # (channels, samples) float32
+            if wav_t.shape[0] > 1:
+                wav_t = wav_t.mean(dim=0, keepdim=True)
+            if sr != self.SR:
+                wav_t = self.AF.resample(wav_t, sr, self.SR)
+            return wav_t.squeeze(0).contiguous().numpy().astype(self.np.float32)
+        except Exception:
+            seg = self.AudioSegment.from_file(io.BytesIO(raw))
+            seg = seg.set_frame_rate(self.SR).set_channels(1).set_sample_width(2)
+            return self.np.asarray(seg.get_array_of_samples(), dtype=self.np.float32) / 32768.0
 
     def _highpass(self, audio):
         return self._sosfiltfilt(self._HPF_SOS, audio).astype(self.np.float32)
@@ -205,11 +220,12 @@ class ASR:
         pad = self.np.zeros(int(ms * self.SR / 1000), dtype=self.np.float32)
         return self.np.concatenate([pad, audio, pad])
 
-    def _preprocess(self, raw: bytes):
+    def _preprocess(self, raw: bytes, trim: bool = True):
         audio = self._decode_audio(raw)
         audio = self._highpass(audio)
         audio = self._normalize_level(audio)
-        audio = self._gentle_trim(audio)
+        if trim:
+            audio = self._gentle_trim(audio)
         audio = self._pad_context(audio)
         return audio
 
@@ -330,21 +346,40 @@ class ASR:
             raise HTTPException(413, f"Audio > {self.MAX_AUDIO_BYTES // 1024} KB.")
         if not raw:
             raise HTTPException(400, "Leere Audiodatei.")
+        t_pre = self.time.perf_counter()
         try:
-            wav = self._preprocess(raw)
+            # Client-Recorder endpointed schon via metering -> kein Silero-VAD noetig.
+            wav = self._preprocess(raw, trim=False)
         except Exception as e:
             raise HTTPException(400, f"Audio ungültig: {e}")
         if wav.size < self.MIN_SAMPLES:
             raise HTTPException(400, "Aufnahme zu kurz.")
+        dt_pre = int((self.time.perf_counter() - t_pre) * 1000)
+
         target_clean = self._strip_diacritics(target)
+
+        t_asr = self.time.perf_counter()
         log_probs, transcription = self._run_asr(wav)
+        dt_asr = int((self.time.perf_counter() - t_asr) * 1000)
+
+        t_score = self.time.perf_counter()
         units = self._gop_score(log_probs, target_clean)
         total = float(self.np.mean([u["score"] for u in units])) if units else 0.0
+        dt_score = int((self.time.perf_counter() - t_score) * 1000)
+
         return {
             "target": target_clean,
             "transcription": transcription,
             "units": units,
             "total": total,
+            "timings": {
+                "audio_bytes": len(raw),
+                "audio_samples": int(wav.size),
+                "audio_ms": int(wav.size * 1000 / self.SR),
+                "preprocess_ms": dt_pre,
+                "asr_ms": dt_asr,
+                "score_ms": dt_score,
+            },
         }
 
     def _score_ayah_streamed(self, raw: bytes, ayah_text: str):
@@ -378,7 +413,8 @@ class ASR:
 
         t_pre = self.time.perf_counter()
         try:
-            wav = self._preprocess(raw)
+            # Client-Recorder endpointed die Ayah (700ms Silence) -> kein Silero-VAD noetig.
+            wav = self._preprocess(raw, trim=False)
         except Exception as e:
             raise HTTPException(400, f"Audio ungueltig: {e}")
         if wav.size < self.MIN_SAMPLES:
@@ -546,7 +582,7 @@ class ASR:
             entries = list(self._LOG_BUF)[-n:][::-1]
             return {"count": len(entries), "entries": entries}
 
-        @api.post("/assess", response_model=AssessResponse, dependencies=[Depends(require_bearer)])
+        @api.post("/assess", dependencies=[Depends(require_bearer)])
         def assess(audio: UploadFile = File(...), target: str = Form(...)):
             target = target.strip()
             if not target:
@@ -558,10 +594,7 @@ class ASR:
             except ValueError as e:
                 raise HTTPException(400, str(e))
             result["duration_ms"] = int((self.time.perf_counter() - t0) * 1000)
-            return AssessResponse(
-                units=[Unit(**u) for u in result["units"]],
-                **{k: v for k, v in result.items() if k != "units"},
-            )
+            return result
 
         @api.websocket("/stream")
         async def stream_ws(ws: WebSocket):

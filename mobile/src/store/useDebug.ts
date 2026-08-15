@@ -11,6 +11,7 @@ export type DebugKind =
   | "ws_ayah_start"
   | "ws_ayah_first"
   | "ws_ayah_done"
+  | "ws_word"
   | "ws_error"
   | "rec_start"
   | "rec_stop"
