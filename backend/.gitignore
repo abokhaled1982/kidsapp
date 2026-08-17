@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .venv/
 .modal/
+.env
+.env.local
+.env.*.local
