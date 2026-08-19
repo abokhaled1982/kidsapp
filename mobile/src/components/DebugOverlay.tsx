@@ -34,7 +34,7 @@ export function DebugOverlay() {
 
   const modeColor =
     lastMode === "ws" ? "#22d3ee" :
-    lastMode === "http" ? "#fbbf24" : "#64748b";
+    "#64748b";
 
   return (
     <>

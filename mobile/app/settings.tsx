@@ -4,6 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useBackend } from "@/store/useBackend";
+import { useProfile } from "@/store/useProfile";
 import { pingHealth } from "@/lib/api";
 import { closeStreamSession, StreamSession } from "@/lib/stream";
 
@@ -13,6 +14,7 @@ export default function SettingsScreen() {
   const savedToken = useBackend((s) => s.token);
   const setUrl = useBackend((s) => s.setUrl);
   const setToken = useBackend((s) => s.setToken);
+  const clearProfile = useProfile((s) => s.clearProfile);
   const [draft, setDraft] = useState(savedUrl);
   const [draftToken, setDraftToken] = useState(savedToken);
   const [check, setCheck] = useState<"idle" | "checking" | "ok" | "fail">("idle");
@@ -43,6 +45,11 @@ export default function SettingsScreen() {
     } finally {
       s.close();
     }
+  };
+
+  const resetProfile = () => {
+    clearProfile();
+    router.replace("/onboarding" as any);
   };
 
   const btnLabel =
@@ -110,6 +117,10 @@ export default function SettingsScreen() {
           <Pressable onPress={runDiagnostic} style={styles.diagBtn}>
             <Ionicons name="pulse" size={18} color="#334155" />
             <Text style={styles.diagBtnText}>Backend & WebSocket testen</Text>
+          </Pressable>
+          <Pressable onPress={resetProfile} style={styles.profileBtn}>
+            <Ionicons name="person-circle-outline" size={18} color="#be123c" />
+            <Text style={styles.profileBtnText}>Profil neu einrichten</Text>
           </Pressable>
           {diag ? (
             <ScrollView style={styles.diagBox} contentContainerStyle={{ padding: 12 }}>
@@ -187,6 +198,19 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   diagBtnText: { color: "#334155", fontSize: 14, fontWeight: "700" },
+  profileBtn: {
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: "#fecdd3",
+    borderRadius: 22,
+    paddingVertical: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    backgroundColor: "#fff1f2",
+  },
+  profileBtnText: { color: "#be123c", fontSize: 14, fontWeight: "700" },
   diagBox: {
     marginTop: 8,
     maxHeight: 200,

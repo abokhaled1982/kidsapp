@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import {
   useAudioRecorder,
-  useAudioRecorderState,
   setAudioModeAsync,
   requestRecordingPermissionsAsync,
   AudioQuality,
@@ -55,11 +54,9 @@ export type RecorderStatus = "idle" | "recording" | "processing" | "done" | "err
  * onStop erhält die lokale URI der finalen m4a-Datei (oder null bei Fehler).
  */
 export function useAutoRecorder(onStop: (uri: string | null) => void) {
-  const recorder = useAudioRecorder({
-    ...ASR_RECORDING_OPTIONS,
-    isMeteringEnabled: true,
-  });
-  const state = useAudioRecorderState(recorder, 100);
+  const mountedRef = useRef(true);
+  const [metering, setMetering] = useState<number | undefined>(undefined);
+  const recorder = useAudioRecorder({ ...ASR_RECORDING_OPTIONS, isMeteringEnabled: true });
 
   const [status, setStatus] = useState<RecorderStatus>("idle");
   const startedAtRef = useRef<number>(0);
@@ -84,7 +81,7 @@ export function useAutoRecorder(onStop: (uri: string | null) => void) {
       await recorder.stop();
       onStop(recorder.uri ?? null);
       setStatus("done");
-    } catch (e) {
+    } catch {
       onStop(null);
       setStatus("error");
     } finally {
@@ -111,8 +108,29 @@ export function useAutoRecorder(onStop: (uri: string | null) => void) {
   }, [recorder, onStop, stop]);
 
   useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+      if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
+      stopTimerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
     if (status !== "recording") return;
-    const db = state.metering ?? -60;
+    const timer = setInterval(() => {
+      if (!mountedRef.current) return;
+      try {
+        setMetering(recorder.getStatus().metering);
+      } catch {
+        clearInterval(timer);
+      }
+    }, 100);
+    return () => clearInterval(timer);
+  }, [recorder, status]);
+
+  useEffect(() => {
+    if (status !== "recording" || !mountedRef.current) return;
+    const db = metering ?? -60;
     const elapsed = Date.now() - startedAtRef.current;
 
     if (!speechStartedRef.current && db > START_DB && elapsed > 100) {
@@ -131,7 +149,7 @@ export function useAutoRecorder(onStop: (uri: string | null) => void) {
         silenceStartRef.current = null;
       }
     }
-  }, [state.metering, status, stop]);
+  }, [metering, status, stop]);
 
-  return { status, start, stop, level: state.metering ?? -60 };
+  return { status, start, stop, level: metering ?? -60 };
 }

@@ -67,14 +67,17 @@ export default function PlayScreen() {
   });
 
   const nextTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const recordStartTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const runWord = () => {
     if (!word) return;
+    if (recordStartTimer.current) clearTimeout(recordStartTimer.current);
     setResult(null);
     setErrMsg(null);
     setPhase("tts");
     speakArabic(word.ar, () => {
-      setTimeout(() => {
+      recordStartTimer.current = setTimeout(() => {
+        recordStartTimer.current = null;
         setPhase("listening");
         rec.start();
       }, 150);
@@ -87,6 +90,8 @@ export default function PlayScreen() {
     return () => {
       stopSpeaking();
       if (nextTimer.current) clearTimeout(nextTimer.current);
+      if (recordStartTimer.current) clearTimeout(recordStartTimer.current);
+      recordStartTimer.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [idx, backendUrl]);

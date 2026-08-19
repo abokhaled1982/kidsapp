@@ -1,4 +1,4 @@
-import { View, Text, ScrollView, Pressable, StyleSheet } from "react-native";
+import { ActivityIndicator, View, Text, ScrollView, Pressable, StyleSheet } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
@@ -6,20 +6,39 @@ import { CATEGORIES } from "@/data/categories";
 import { WORDS } from "@/data/words";
 import { CategoryCard } from "@/components/CategoryCard";
 import { useProgress, level } from "@/store/useProgress";
+import { useProfile } from "@/store/useProfile";
+import { initialProfileScreen } from "@/store/profileFlow";
+import OnboardingScreen from "../onboarding";
 
 export default function AussprachHome() {
   const router = useRouter();
+  const profile = useProfile((s) => s.profile);
+  const hasHydrated = useProfile((s) => s.hasHydrated);
   const xp = useProgress((s) => s.xp);
   const stars = useProgress((s) => s.stars);
   const mastered = useProgress((s) => s.wordsMastered);
   const lv = level(xp);
 
+  const screen = initialProfileScreen(hasHydrated, profile);
+
+  if (screen === "loading") {
+    return (
+      <View style={{ flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: "#f8fafc" }}>
+        <ActivityIndicator color="#2474d2" />
+      </View>
+    );
+  }
+
+  if (screen === "onboarding" || !profile) {
+    return <OnboardingScreen onComplete={() => undefined} />;
+  }
+
   return (
     <SafeAreaView style={styles.root} edges={["top"]}>
       <View style={styles.headerRow}>
         <View>
-          <Text style={styles.hello}>Salām 👋</Text>
-          <Text style={styles.sub}>Lass uns Arabisch lernen!</Text>
+          <Text style={styles.hello}>Salām, {profile.name} 👋</Text>
+          <Text style={styles.sub}>{profile.level}. Lernlevel · Lass uns Arabisch lernen!</Text>
         </View>
         <Pressable onPress={() => router.push("/settings" as any)} style={styles.gearBtn}>
           <Ionicons name="settings-outline" size={22} color="#334155" />
