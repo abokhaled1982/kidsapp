@@ -1,8 +1,11 @@
 import { View, Text, StyleSheet, ScrollView } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useProgress, level, xpForNextLevel } from "@/store/useProgress";
+import { useTheme } from "@/store/useTheme";
+import type { ThemePalette } from "@/store/profileModel";
 
 export default function RewardsScreen() {
+  const c = useTheme();
   const xp = useProgress((s) => s.xp);
   const stars = useProgress((s) => s.stars);
   const streak = useProgress((s) => s.streakDays);
@@ -12,55 +15,61 @@ export default function RewardsScreen() {
   const wordsCount = Object.keys(mastered).length;
 
   return (
-    <SafeAreaView style={styles.root} edges={["top"]}>
+    <SafeAreaView style={[styles.root, { backgroundColor: c.background }]} edges={["top"]}>
       <ScrollView contentContainerStyle={styles.scroll}>
-        <Text style={styles.title}>Meine Sterne</Text>
+        <Text style={[styles.title, { color: c.text }]}>Meine Sterne</Text>
 
-        <View style={styles.card}>
-          <Text style={styles.big}>{stars} ⭐</Text>
-          <Text style={styles.label}>Gesamt Sterne</Text>
+        <View style={[styles.card, { backgroundColor: c.surface, borderColor: c.border }]}>
+          <Text style={[styles.big, { color: c.text }]}>{stars} ⭐</Text>
+          <Text style={[styles.label, { color: c.textMuted }]}>Gesamt Sterne</Text>
         </View>
 
         <View style={styles.row}>
-          <Stat value={`Lvl ${lv}`} label="Level" />
-          <Stat value={xp} label="XP" />
-          <Stat value={`${streak}🔥`} label="Streak" />
+          <Stat value={`Lvl ${lv}`} label="Level" colors={c} />
+          <Stat value={xp} label="XP" colors={c} />
+          <Stat value={`${streak}🔥`} label="Streak" colors={c} />
         </View>
 
-        <View style={styles.card}>
-          <Text style={styles.small}>Nächstes Level bei {nextXp} XP</Text>
-          <View style={styles.barBg}>
-            <View style={[styles.barFill, { width: `${Math.min(100, (xp / nextXp) * 100)}%` }]} />
+        <View style={[styles.card, { backgroundColor: c.surface, borderColor: c.border }]}>
+          <Text style={[styles.small, { color: c.textMuted }]}>Nächstes Level bei {nextXp} XP</Text>
+          <View style={[styles.barBg, { backgroundColor: c.surfaceMuted }]}>
+            <View
+              style={[
+                styles.barFill,
+                { backgroundColor: c.primary, width: `${Math.min(100, (xp / nextXp) * 100)}%` },
+              ]}
+            />
           </View>
         </View>
 
-        <View style={styles.card}>
-          <Text style={styles.small}>Gelernte Wörter</Text>
-          <Text style={styles.big}>{wordsCount}</Text>
+        <View style={[styles.card, { backgroundColor: c.surface, borderColor: c.border }]}>
+          <Text style={[styles.small, { color: c.textMuted }]}>Gelernte Wörter</Text>
+          <Text style={[styles.big, { color: c.text }]}>{wordsCount}</Text>
         </View>
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-function Stat({ value, label }: { value: string | number; label: string }) {
+function Stat({ value, label, colors }: { value: string | number; label: string; colors: ThemePalette }) {
   return (
-    <View style={[styles.card, { flex: 1, alignItems: "center" }]}>
-      <Text style={styles.big}>{value}</Text>
-      <Text style={styles.label}>{label}</Text>
+    <View style={[styles.card, styles.statCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+      <Text style={[styles.big, { color: colors.text }]}>{value}</Text>
+      <Text style={[styles.label, { color: colors.textMuted }]}>{label}</Text>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: "#f8fafc" },
+  root: { flex: 1 },
   scroll: { padding: 20, gap: 12 },
-  title: { fontSize: 22, fontWeight: "700", color: "#0f172a", marginBottom: 6 },
-  card: { backgroundColor: "white", padding: 16, borderRadius: 18, gap: 4 },
+  title: { fontSize: 22, fontWeight: "700", marginBottom: 6 },
+  card: { borderRadius: 18, borderWidth: 1, gap: 4, padding: 16 },
+  statCard: { alignItems: "center", flex: 1 },
   row: { flexDirection: "row", gap: 12 },
-  big: { fontSize: 28, fontWeight: "800", color: "#0f172a" },
-  small: { fontSize: 13, color: "#64748b" },
-  label: { fontSize: 12, color: "#64748b" },
-  barBg: { height: 8, borderRadius: 4, backgroundColor: "#e2e8f0", marginTop: 8, overflow: "hidden" },
-  barFill: { height: "100%", backgroundColor: "#3b82f6" },
+  big: { fontSize: 28, fontWeight: "800" },
+  small: { fontSize: 13 },
+  label: { fontSize: 12 },
+  barBg: { borderRadius: 4, height: 8, marginTop: 8, overflow: "hidden" },
+  barFill: { height: "100%" },
 });

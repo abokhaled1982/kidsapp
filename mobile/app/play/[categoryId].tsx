@@ -13,6 +13,8 @@ import { getStreamSession } from "@/lib/stream";
 import { useAutoRecorder } from "@/hooks/useAutoRecorder";
 import { useBackend } from "@/store/useBackend";
 import { useProgress } from "@/store/useProgress";
+import { useTheme } from "@/store/useTheme";
+import type { ThemePalette } from "@/store/profileModel";
 import { LetterFeedback } from "@/components/LetterFeedback";
 import { LatencyChip } from "@/components/LatencyChip";
 import { StarBurst } from "@/components/StarBurst";
@@ -23,11 +25,12 @@ type Phase = "idle" | "tts" | "listening" | "processing" | "result" | "error";
 export default function PlayScreen() {
   const { categoryId } = useLocalSearchParams<{ categoryId: CategoryId }>();
   const router = useRouter();
+  const c = useTheme();
   const backendUrl = useBackend((s) => s.url);
   const backendToken = useBackend((s) => s.token);
   const addResult = useProgress((s) => s.addResult);
 
-  const category = useMemo(() => CATEGORIES.find((c) => c.id === categoryId), [categoryId]);
+  const category = useMemo(() => CATEGORIES.find((x) => x.id === categoryId), [categoryId]);
   const items = useMemo(() => WORDS[categoryId as CategoryId] ?? [], [categoryId]);
 
   const [idx, setIdx] = useState(0);
@@ -120,47 +123,59 @@ export default function PlayScreen() {
 
   if (!category) {
     return (
-      <SafeAreaView style={[styles.root, styles.center]}>
-        <Text>Kategorie unbekannt.</Text>
+      <SafeAreaView style={[styles.root, styles.center, { backgroundColor: c.background }]}>
+        <Text style={{ color: c.text }}>Kategorie unbekannt.</Text>
       </SafeAreaView>
     );
   }
 
   if (!backendUrl) {
     return (
-      <SafeAreaView style={[styles.root, styles.center]}>
-        <Text style={styles.title}>Erst Backend einrichten</Text>
-        <Text style={styles.subMuted}>
+      <SafeAreaView style={[styles.root, styles.center, { backgroundColor: c.background }]}>
+        <Text style={[styles.title, { color: c.text }]}>Erst Backend einrichten</Text>
+        <Text style={[styles.subMuted, { color: c.textMuted }]}>
           Öffne die Einstellungen und trage die Colab-URL ein.
         </Text>
-        <Pressable onPress={() => router.push("/settings" as any)} style={styles.primaryBtn}>
-          <Text style={styles.primaryBtnText}>Zu den Einstellungen</Text>
+        <Pressable
+          onPress={() => router.push("/settings" as any)}
+          style={[styles.primaryBtn, { backgroundColor: c.primary }]}
+        >
+          <Text style={[styles.primaryBtnText, { color: c.onPrimary }]}>Zu den Einstellungen</Text>
         </Pressable>
       </SafeAreaView>
     );
   }
 
   return (
-    <SafeAreaView style={styles.root} edges={["top", "left", "right"]}>
+    <SafeAreaView style={[styles.root, { backgroundColor: c.background }]} edges={["top", "left", "right"]}>
       <View style={styles.header}>
         <Pressable
           onPress={() => router.back()}
-          style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
+          style={({ pressed }) => [
+            styles.iconBtn,
+            { backgroundColor: c.surface, borderColor: c.border },
+            pressed && styles.pressed,
+          ]}
           hitSlop={10}
         >
-          <Ionicons name="chevron-back" size={22} color="#334155" />
+          <Ionicons name="chevron-back" size={22} color={c.text} />
         </Pressable>
         <View style={styles.headerCenter}>
           <Text style={styles.headerEmoji}>{category.emoji}</Text>
-          <Text style={styles.headerTitle} numberOfLines={1}>{category.title}</Text>
+          <Text style={[styles.headerTitle, { color: c.text }]} numberOfLines={1}>{category.title}</Text>
         </View>
         <View style={{ width: 40 }} />
       </View>
 
-      <View style={styles.progressBg}>
-        <View style={[styles.progressFill, { width: `${((idx + 1) / items.length) * 100}%` }]} />
+      <View style={[styles.progressBg, { backgroundColor: c.surfaceMuted }]}>
+        <View
+          style={[
+            styles.progressFill,
+            { backgroundColor: c.primary, width: `${((idx + 1) / items.length) * 100}%` },
+          ]}
+        />
       </View>
-      <Text style={styles.progressText}>Wort {idx + 1} / {items.length}</Text>
+      <Text style={[styles.progressText, { color: c.textMuted }]}>Wort {idx + 1} / {items.length}</Text>
 
       <ScrollView
         style={styles.scroll}
@@ -168,73 +183,77 @@ export default function PlayScreen() {
         showsVerticalScrollIndicator={false}
         bounces={false}
       >
-        <View style={styles.wordCard}>
-          <Text style={styles.arabic} allowFontScaling={false}>{word?.ar}</Text>
-          <Text style={styles.de}>{word?.de}</Text>
-          {word?.translit ? <Text style={styles.translit}>{word.translit}</Text> : null}
+        <View style={[styles.wordCard, { backgroundColor: c.surface, shadowColor: c.text }]}>
+          <Text style={[styles.arabic, { color: c.text }]} allowFontScaling={false}>{word?.ar}</Text>
+          <Text style={[styles.de, { color: c.text }]}>{word?.de}</Text>
+          {word?.translit ? (
+            <Text style={[styles.translit, { color: c.textMuted }]}>{word.translit}</Text>
+          ) : null}
         </View>
 
         <View style={styles.phaseWrap}>
           {phase === "tts" && (
             <View style={styles.phaseRow}>
-              <Ionicons name="volume-high" size={26} color="#2563eb" />
-              <Text style={styles.phaseText}>Hör gut zu…</Text>
+              <Ionicons name="volume-high" size={26} color={c.info} />
+              <Text style={[styles.phaseText, { color: c.info }]}>Hör gut zu…</Text>
             </View>
           )}
           {phase === "listening" && (
             <>
               <PulsingMic active level={rec.level} />
-              <Text style={[styles.phaseText, { color: "#ef4444", marginTop: 10 }]}>Sprich das Wort!</Text>
+              <Text style={[styles.phaseText, { color: c.recording, marginTop: 10 }]}>Sprich das Wort!</Text>
             </>
           )}
           {phase === "processing" && (
             <View style={{ alignItems: "center" }}>
-              <ActivityIndicator size="large" color="#2563eb" />
-              <Text style={styles.subMuted}>Bewertung…</Text>
+              <ActivityIndicator size="large" color={c.primary} />
+              <Text style={[styles.subMuted, { color: c.textMuted }]}>Bewertung…</Text>
             </View>
           )}
           {phase === "error" && (
             <View style={{ alignItems: "center" }}>
-              <Text style={{ color: "#ef4444", textAlign: "center" }}>{errMsg}</Text>
-              <Pressable onPress={runWord} style={styles.primaryBtn}>
-                <Text style={styles.primaryBtnText}>Nochmal versuchen</Text>
+              <Text style={{ color: c.bad.base, textAlign: "center" }}>{errMsg}</Text>
+              <Pressable onPress={runWord} style={[styles.primaryBtn, { backgroundColor: c.primary }]}>
+                <Text style={[styles.primaryBtnText, { color: c.onPrimary }]}>Nochmal versuchen</Text>
               </Pressable>
             </View>
           )}
         </View>
 
         {phase === "result" && result && (
-          <View style={styles.resultCard}>
+          <View style={[styles.resultCard, { backgroundColor: c.surface, shadowColor: c.text }]}>
             <StarBurst show={result.total >= 75} />
             <LetterFeedback units={result.units} />
-            <Text style={styles.subMuted}>
-              Du hast gesagt: <Text style={styles.arabicSmall}>{result.transcription || "—"}</Text>
+            <Text style={[styles.subMuted, { color: c.textMuted }]}>
+              Du hast gesagt:{" "}
+              <Text style={[styles.arabicSmall, { color: c.text }]}>{result.transcription || "—"}</Text>
             </Text>
-            <ScoreBar total={result.total} />
+            <ScoreBar total={result.total} colors={c} />
             <LatencyChip meta={meta ?? undefined} serverMs={result.duration_ms} />
 
             {(meta?.client || result.timings) && (
-              <View style={styles.diagBox}>
-                <Text style={styles.diagTitle}>Latenz-Analyse</Text>
-                <DiagLine label="Modus" value="ws" bold />
+              <View style={[styles.diagBox, { backgroundColor: c.background, borderColor: c.border }]}>
+                <Text style={[styles.diagTitle, { color: c.text }]}>Latenz-Analyse</Text>
+                <DiagLine label="Modus" value="ws" bold colors={c} />
                 {meta?.client && (
                   <>
                     <DiagLine
                       label="Audio (Handy → Bytes)"
                       value={`${meta.client.bytes_read_ms} ms`}
                       extra={`${Math.round((meta.client.bytes ?? 0) / 1024)} KB`}
+                      colors={c}
                     />
-                    <DiagLine label="WS send-Aufruf" value={`${meta.client.ws_send_ms} ms`} />
-                    <DiagLine label="WS warm?" value={meta.client.warm ? "ja" : "nein (Connect)"} />
-                    <DiagLine label="→ Roundtrip (rtt)" value={`${meta.client.rtt_ms} ms`} bold />
+                    <DiagLine label="WS send-Aufruf" value={`${meta.client.ws_send_ms} ms`} colors={c} />
+                    <DiagLine label="WS warm?" value={meta.client.warm ? "ja" : "nein (Connect)"} colors={c} />
+                    <DiagLine label="→ Roundtrip (rtt)" value={`${meta.client.rtt_ms} ms`} bold colors={c} />
                   </>
                 )}
                 {result.timings && (
                   <>
-                    <DiagLine label="Audio-Länge (Kind spricht)" value={`${result.timings.audio_ms ?? "?"} ms`} />
-                    <DiagLine label="Preprocess (CPU)" value={`${result.timings.preprocess_ms ?? "?"} ms`} />
-                    <DiagLine label="ASR (GPU)" value={`${result.timings.asr_ms ?? "?"} ms`} bold />
-                    <DiagLine label="Wort-Scoring" value={`${result.timings.score_ms ?? "?"} ms`} />
+                    <DiagLine label="Audio-Länge (Kind spricht)" value={`${result.timings.audio_ms ?? "?"} ms`} colors={c} />
+                    <DiagLine label="Preprocess (CPU)" value={`${result.timings.preprocess_ms ?? "?"} ms`} colors={c} />
+                    <DiagLine label="ASR (GPU)" value={`${result.timings.asr_ms ?? "?"} ms`} bold colors={c} />
+                    <DiagLine label="Wort-Scoring" value={`${result.timings.score_ms ?? "?"} ms`} colors={c} />
                   </>
                 )}
               </View>
@@ -246,7 +265,12 @@ export default function PlayScreen() {
       <View
         style={[
           styles.footer,
-          { paddingBottom: Math.max(insets.bottom, 12) + 8 },
+          {
+            backgroundColor: c.surface,
+            borderTopColor: c.border,
+            shadowColor: c.text,
+            paddingBottom: Math.max(insets.bottom, 12) + 8,
+          },
         ]}
       >
         <Pressable
@@ -254,42 +278,50 @@ export default function PlayScreen() {
           disabled={busy}
           style={({ pressed }) => [
             styles.footerBtn,
-            styles.footerSecondary,
+            { backgroundColor: c.surfaceMuted, borderWidth: 1, borderColor: c.border },
             busy && { opacity: 0.5 },
             pressed && styles.pressed,
           ]}
         >
-          <Ionicons name="reload" size={18} color="#334155" />
-          <Text style={styles.footerSecondaryText}>Nochmal</Text>
+          <Ionicons name="reload" size={18} color={c.text} />
+          <Text style={[styles.footerBtnText, { color: c.text }]}>Nochmal</Text>
         </Pressable>
         <Pressable
           onPress={goNext}
           disabled={busy}
           style={({ pressed }) => [
             styles.footerBtn,
-            styles.footerPrimary,
+            { backgroundColor: c.primary },
             busy && { opacity: 0.5 },
             pressed && styles.pressed,
           ]}
         >
-          <Ionicons name="play" size={18} color="white" />
-          <Text style={styles.footerPrimaryText}>Weiter</Text>
+          <Ionicons name="play" size={18} color={c.onPrimary} />
+          <Text style={[styles.footerBtnText, { color: c.onPrimary }]}>Weiter</Text>
         </Pressable>
       </View>
     </SafeAreaView>
   );
 }
 
-function ScoreBar({ total }: { total: number }) {
+function ScoreBar({ total, colors }: { total: number; colors: ThemePalette }) {
   const t = Math.round(total);
-  const color = t >= 75 ? "#22c55e" : t >= 50 ? "#f59e0b" : "#ef4444";
+  const tone = t >= 75 ? colors.good : t >= 50 ? colors.medium : colors.bad;
   const label = t >= 75 ? "🌟 Sehr gut!" : t >= 50 ? "🙂 Fast!" : "💪 Nochmal!";
   return (
     <View style={{ width: "100%", marginTop: 12 }}>
-      <View style={{ height: 10, backgroundColor: "#e2e8f0", borderRadius: 5, overflow: "hidden" }}>
-        <View style={{ width: `${t}%`, height: "100%", backgroundColor: color }} />
+      <View style={{ height: 10, backgroundColor: colors.surfaceMuted, borderRadius: 5, overflow: "hidden" }}>
+        <View style={{ width: `${t}%`, height: "100%", backgroundColor: tone.base }} />
       </View>
-      <Text style={{ textAlign: "center", fontSize: 16, fontWeight: "700", marginTop: 6 }}>
+      <Text
+        style={{
+          textAlign: "center",
+          fontSize: 16,
+          fontWeight: "700",
+          marginTop: 6,
+          color: tone.text,
+        }}
+      >
         {label} {t} / 100
       </Text>
     </View>
@@ -297,12 +329,18 @@ function ScoreBar({ total }: { total: number }) {
 }
 
 function DiagLine({
-  label, value, extra, bold,
-}: { label: string; value: string | number; extra?: string; bold?: boolean }) {
+  label, value, extra, bold, colors,
+}: {
+  label: string;
+  value: string | number;
+  extra?: string;
+  bold?: boolean;
+  colors: ThemePalette;
+}) {
   return (
     <View style={styles.diagRow}>
-      <Text style={styles.diagLabel}>{label}</Text>
-      <Text style={[styles.diagValue, bold && styles.diagBold]}>
+      <Text style={[styles.diagLabel, { color: colors.textMuted }]}>{label}</Text>
+      <Text style={[styles.diagValue, { color: colors.text }, bold && styles.diagBold]}>
         {value}{extra ? `  ·  ${extra}` : ""}
       </Text>
     </View>
@@ -310,37 +348,36 @@ function DiagLine({
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: "#f8fafc" },
+  root: { flex: 1 },
   center: { alignItems: "center", justifyContent: "center", padding: 24 },
-  title: { fontSize: 20, fontWeight: "700", color: "#0f172a", textAlign: "center" },
-  subMuted: { color: "#64748b", textAlign: "center", marginTop: 6 },
+  title: { fontSize: 20, fontWeight: "700", textAlign: "center" },
+  subMuted: { textAlign: "center", marginTop: 6 },
   pressed: { opacity: 0.75, transform: [{ scale: 0.98 }] },
   primaryBtn: {
     marginTop: 12,
-    backgroundColor: "#3b82f6",
     paddingHorizontal: 20,
     paddingVertical: 12,
     borderRadius: 22,
   },
-  primaryBtnText: { color: "white", fontWeight: "700" },
+  primaryBtnText: { fontWeight: "700" },
   header: {
     flexDirection: "row", alignItems: "center", justifyContent: "space-between",
     paddingHorizontal: 12, paddingVertical: 8,
   },
   iconBtn: {
-    width: 40, height: 40, borderRadius: 20, backgroundColor: "white",
+    width: 40, height: 40, borderRadius: 20,
     alignItems: "center", justifyContent: "center",
-    borderWidth: 1, borderColor: "#e2e8f0",
+    borderWidth: 1,
   },
   headerCenter: { flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1 },
   headerEmoji: { fontSize: 22 },
-  headerTitle: { fontSize: 17, fontWeight: "700", color: "#0f172a", flexShrink: 1 },
+  headerTitle: { fontSize: 17, fontWeight: "700", flexShrink: 1 },
   progressBg: {
-    height: 8, marginHorizontal: 20, backgroundColor: "#e2e8f0",
+    height: 8, marginHorizontal: 20,
     borderRadius: 4, overflow: "hidden",
   },
-  progressFill: { height: "100%", backgroundColor: "#3b82f6" },
-  progressText: { textAlign: "center", color: "#64748b", fontSize: 12, marginTop: 4 },
+  progressFill: { height: "100%" },
+  progressText: { textAlign: "center", fontSize: 12, marginTop: 4 },
   scroll: { flex: 1 },
   scrollContent: {
     flexGrow: 1,
@@ -352,34 +389,30 @@ const styles = StyleSheet.create({
   },
   wordCard: {
     width: "100%",
-    backgroundColor: "white",
     borderRadius: 20,
     paddingVertical: 24,
     paddingHorizontal: 16,
     alignItems: "center",
-    shadowColor: "#0f172a",
     shadowOpacity: 0.06,
     shadowRadius: 12,
     shadowOffset: { width: 0, height: 4 },
     elevation: 2,
   },
-  arabic: { fontSize: 72, lineHeight: 96, color: "#0f172a", writingDirection: "rtl", textAlign: "center" },
-  arabicSmall: { fontSize: 20, color: "#0f172a", writingDirection: "rtl" },
-  de: { color: "#334155", fontSize: 18, marginTop: 6, fontWeight: "600" },
-  translit: { color: "#94a3b8", fontStyle: "italic", fontSize: 14, marginTop: 2 },
+  arabic: { fontSize: 72, lineHeight: 96, writingDirection: "rtl", textAlign: "center" },
+  arabicSmall: { fontSize: 20, writingDirection: "rtl" },
+  de: { fontSize: 18, marginTop: 6, fontWeight: "600" },
+  translit: { fontStyle: "italic", fontSize: 14, marginTop: 2 },
   phaseWrap: { marginTop: 24, alignItems: "center", minHeight: 120, justifyContent: "center" },
   phaseRow: { flexDirection: "row", alignItems: "center", gap: 10 },
-  phaseText: { color: "#2563eb", fontSize: 17 },
+  phaseText: { fontSize: 17 },
   resultCard: {
     marginTop: 20,
     width: "100%",
     alignItems: "center",
     position: "relative",
-    backgroundColor: "white",
     borderRadius: 20,
     paddingVertical: 18,
     paddingHorizontal: 16,
-    shadowColor: "#0f172a",
     shadowOpacity: 0.06,
     shadowRadius: 12,
     shadowOffset: { width: 0, height: 4 },
@@ -390,10 +423,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingTop: 12,
     gap: 12,
-    backgroundColor: "white",
     borderTopWidth: 1,
-    borderTopColor: "#e2e8f0",
-    shadowColor: "#0f172a",
     shadowOpacity: 0.05,
     shadowRadius: 8,
     shadowOffset: { width: 0, height: -2 },
@@ -409,27 +439,19 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     gap: 8,
   },
-  footerSecondary: {
-    backgroundColor: "#f1f5f9", borderWidth: 1, borderColor: "#e2e8f0",
-  },
-  footerSecondaryText: { color: "#334155", fontWeight: "700", fontSize: 16 },
-  footerPrimary: { backgroundColor: "#22c55e" },
-  footerPrimaryText: { color: "white", fontWeight: "700", fontSize: 16 },
+  footerBtnText: { fontWeight: "700", fontSize: 16 },
 
   diagBox: {
     marginTop: 16,
     width: "100%",
     padding: 12,
     borderRadius: 12,
-    backgroundColor: "#f8fafc",
     borderWidth: 1,
-    borderColor: "#e2e8f0",
     gap: 4,
   },
   diagTitle: {
     fontSize: 12,
     fontWeight: "800",
-    color: "#0f172a",
     marginBottom: 6,
     letterSpacing: 0.5,
     textTransform: "uppercase",
@@ -439,7 +461,7 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
   },
-  diagLabel: { fontSize: 12, color: "#475569", flexShrink: 1 },
-  diagValue: { fontSize: 12, color: "#0f172a", fontVariant: ["tabular-nums"], fontWeight: "600" },
+  diagLabel: { fontSize: 12, flexShrink: 1 },
+  diagValue: { fontSize: 12, fontVariant: ["tabular-nums"], fontWeight: "600" },
   diagBold: { fontWeight: "800" },
 });

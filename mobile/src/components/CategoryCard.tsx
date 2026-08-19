@@ -1,5 +1,6 @@
 import { View, Text, Pressable, StyleSheet } from "react-native";
 import type { Category } from "@/data/categories";
+import { useTheme } from "@/store/useTheme";
 
 type Props = {
   category: Category;
@@ -8,17 +9,22 @@ type Props = {
 };
 
 export function CategoryCard({ category, progressPct, onPress }: Props) {
+  const c = useTheme();
+  // Farbe kommt aus dem gewaehlten Theme; category.color bleibt Fallback.
+  const bg = c.categories[category.id] ?? category.color;
+  const fg = c.onPrimary;
+
   return (
     <Pressable
       onPress={onPress}
       style={({ pressed }) => [
         styles.card,
-        { backgroundColor: category.color, opacity: pressed ? 0.85 : 1 },
+        { backgroundColor: bg, opacity: pressed ? 0.85 : 1 },
       ]}
     >
       <Text style={styles.emoji}>{category.emoji}</Text>
-      <Text style={[styles.title, { color: category.fg }]}>{category.title}</Text>
-      <Text style={[styles.arabic, { color: category.fg }]} numberOfLines={1}>
+      <Text style={[styles.title, { color: fg }]}>{category.title}</Text>
+      <Text style={[styles.arabic, { color: fg }]} numberOfLines={1}>
         {category.arabic}
       </Text>
       <View style={styles.progressBg}>

@@ -16,6 +16,8 @@ import * as Haptics from "expo-haptics";
 import { SURAHS } from "@/data/juzamma";
 import { useBackend } from "@/store/useBackend";
 import { useProgress } from "@/store/useProgress";
+import { useTheme } from "@/store/useTheme";
+import type { ThemePalette } from "@/store/profileModel";
 import { speakArabic, stopSpeaking } from "@/lib/tts";
 import { useAyahRecorder } from "@/hooks/useAyahRecorder";
 import {
@@ -45,12 +47,22 @@ function stateFromScore(score: number): WordChipState {
 }
 
 function DiagLine({
-  label, value, extra, bold, muted,
-}: { label: string; value: string; extra?: string; bold?: boolean; muted?: boolean }) {
+  label, value, extra, bold, muted, colors,
+}: {
+  label: string;
+  value: string;
+  extra?: string;
+  bold?: boolean;
+  muted?: boolean;
+  colors: ThemePalette;
+}) {
+  const tint = muted ? colors.textMuted : colors.text;
   return (
     <View style={styles.diagRow}>
-      <Text style={[styles.diagLabel, muted && styles.diagMuted]}>{label}</Text>
-      <Text style={[styles.diagValue, bold && styles.diagBold, muted && styles.diagMuted]}>
+      <Text style={[styles.diagLabel, { color: colors.textMuted }, muted && styles.diagMuted]}>
+        {label}
+      </Text>
+      <Text style={[styles.diagValue, { color: tint }, bold && styles.diagBold, muted && styles.diagMuted]}>
         {value}{extra ? `  · ${extra}` : ""}
       </Text>
     </View>
@@ -60,6 +72,7 @@ function DiagLine({
 export default function QuranAyahScreen() {
   const { surahId } = useLocalSearchParams<{ surahId: string }>();
   const router = useRouter();
+  const c = useTheme();
   const backendUrl = useBackend((s) => s.url);
   const backendToken = useBackend((s) => s.token);
   const addResult  = useProgress((s) => s.addResult);
@@ -237,29 +250,34 @@ export default function QuranAyahScreen() {
   // ------- Guards -------
   if (!surah) {
     return (
-      <SafeAreaView style={[styles.root, styles.center]}>
-        <Text style={styles.headline}>Sura nicht gefunden.</Text>
-        <Pressable onPress={() => router.back()} style={styles.primaryBtn}>
-          <Text style={styles.primaryBtnText}>Zurück</Text>
+      <SafeAreaView style={[styles.root, styles.center, { backgroundColor: c.background }]}>
+        <Text style={[styles.headline, { color: c.text }]}>Sura nicht gefunden.</Text>
+        <Pressable onPress={() => router.back()} style={[styles.primaryBtn, { backgroundColor: c.primary }]}>
+          <Text style={[styles.primaryBtnText, { color: c.onPrimary }]}>Zurück</Text>
         </Pressable>
       </SafeAreaView>
     );
   }
   if (!backendUrl) {
     return (
-      <SafeAreaView style={[styles.root, styles.center]}>
-        <Text style={styles.headline}>Backend fehlt</Text>
-        <Text style={styles.sub}>Öffne die Einstellungen und trage die Colab-URL ein.</Text>
-        <Pressable onPress={() => router.push("/settings" as any)} style={styles.primaryBtn}>
-          <Text style={styles.primaryBtnText}>Zu den Einstellungen</Text>
+      <SafeAreaView style={[styles.root, styles.center, { backgroundColor: c.background }]}>
+        <Text style={[styles.headline, { color: c.text }]}>Backend fehlt</Text>
+        <Text style={[styles.sub, { color: c.textMuted }]}>
+          Öffne die Einstellungen und trage die Colab-URL ein.
+        </Text>
+        <Pressable
+          onPress={() => router.push("/settings" as any)}
+          style={[styles.primaryBtn, { backgroundColor: c.primary }]}
+        >
+          <Text style={[styles.primaryBtnText, { color: c.onPrimary }]}>Zu den Einstellungen</Text>
         </Pressable>
       </SafeAreaView>
     );
   }
   if (!ayah) {
     return (
-      <SafeAreaView style={[styles.root, styles.center]}>
-        <Text style={styles.headline}>Keine Verse verfügbar.</Text>
+      <SafeAreaView style={[styles.root, styles.center, { backgroundColor: c.background }]}>
+        <Text style={[styles.headline, { color: c.text }]}>Keine Verse verfügbar.</Text>
       </SafeAreaView>
     );
   }
@@ -268,29 +286,33 @@ export default function QuranAyahScreen() {
   const percent = ((ayahIdx + 1) / ayat.length) * 100;
 
   return (
-    <SafeAreaView style={styles.root} edges={["top", "left", "right"]}>
+    <SafeAreaView style={[styles.root, { backgroundColor: c.background }]} edges={["top", "left", "right"]}>
       {/* Header */}
       <View style={styles.header}>
         <Pressable
           onPress={() => router.back()}
-          style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
+          style={({ pressed }) => [
+            styles.iconBtn,
+            { backgroundColor: c.surface, borderColor: c.border },
+            pressed && styles.pressed,
+          ]}
           hitSlop={10}
         >
-          <Ionicons name="chevron-back" size={22} color="#334155" />
+          <Ionicons name="chevron-back" size={22} color={c.text} />
         </Pressable>
         <View style={styles.headerCenter}>
-          <Text style={styles.headerAr} allowFontScaling={false}>
+          <Text style={[styles.headerAr, { color: c.text }]} allowFontScaling={false}>
             سُورَة {surah.name_ar}
           </Text>
-          <Text style={styles.headerMeta}>
+          <Text style={[styles.headerMeta, { color: c.textMuted }]}>
             {surah.translit} · Vers {ayahIdx + 1} / {ayat.length}
           </Text>
         </View>
         <View style={{ width: 40 }} />
       </View>
 
-      <View style={styles.progressBg}>
-        <View style={[styles.progressFill, { width: `${percent}%` }]} />
+      <View style={[styles.progressBg, { backgroundColor: c.surfaceMuted }]}>
+        <View style={[styles.progressFill, { backgroundColor: c.good.base, width: `${percent}%` }]} />
       </View>
 
       <NetworkStatusBadge />
@@ -301,12 +323,12 @@ export default function QuranAyahScreen() {
         showsVerticalScrollIndicator={false}
       >
         {/* Ayah-Karte */}
-        <View style={styles.ayahCard}>
+        <View style={[styles.ayahCard, { backgroundColor: c.surface, borderColor: c.border, shadowColor: c.text }]}>
           <View style={styles.ayahHeader}>
-            <View style={styles.ayahBadge}>
-              <Text style={styles.ayahBadgeText}>{toArabicNumber(ayah.n)}</Text>
+            <View style={[styles.ayahBadge, { backgroundColor: c.surfaceMuted, borderColor: c.primary }]}>
+              <Text style={[styles.ayahBadgeText, { color: c.primary }]}>{toArabicNumber(ayah.n)}</Text>
             </View>
-            <Text style={styles.ayahHeaderText}>Vers</Text>
+            <Text style={[styles.ayahHeaderText, { color: c.textMuted }]}>Vers</Text>
           </View>
 
           <View style={styles.ayahWordsWrap}>
@@ -328,79 +350,88 @@ export default function QuranAyahScreen() {
         {/* Zustandsblock */}
         <View style={styles.phaseWrap}>
           {phase === "idle" && (
-            <Text style={styles.hint}>Ich höre gleich zu — rezitiere einfach los.</Text>
+            <Text style={[styles.hint, { color: c.text }]}>Ich höre gleich zu — rezitiere einfach los.</Text>
           )}
           {phase === "tts" && (
             <View style={styles.row}>
-              <Ionicons name="volume-high" size={22} color="#2563eb" />
-              <Text style={[styles.hint, { color: "#2563eb" }]}>Hör gut zu…</Text>
+              <Ionicons name="volume-high" size={22} color={c.info} />
+              <Text style={[styles.hint, { color: c.info }]}>Hör gut zu…</Text>
             </View>
           )}
           {phase === "listening" && (
             <>
               <PulsingMic active level={rec.level} />
-              <Text style={[styles.hint, { color: "#ef4444", marginTop: 12 }]}>
+              <Text style={[styles.hint, { color: c.recording, marginTop: 12 }]}>
                 Ich höre dir zu…
               </Text>
-              <Text style={[styles.hintSub, { marginTop: 4 }]}>
+              <Text style={[styles.hintSub, { color: c.textMuted, marginTop: 4 }]}>
                 Ich stoppe automatisch, wenn du fertig bist.
               </Text>
             </>
           )}
           {phase === "scoring" && (
             <View style={styles.row}>
-              <ActivityIndicator size="small" color="#2563eb" />
-              <Text style={[styles.hint, { color: "#2563eb" }]}>Bewertung läuft…</Text>
+              <ActivityIndicator size="small" color={c.scanning.base} />
+              <Text style={[styles.hint, { color: c.scanning.text }]}>Bewertung läuft…</Text>
             </View>
           )}
           {phase === "result" && totalScore != null && (
             <View style={styles.resultBlock}>
               <StarBurst show={totalScore >= 75} />
-              <Text style={styles.scoreBig}>{Math.round(totalScore)}</Text>
-              <Text style={styles.scoreLabel}>
+              <Text style={[styles.scoreBig, { color: c.text }]}>{Math.round(totalScore)}</Text>
+              <Text style={[styles.scoreLabel, { color: c.text }]}>
                 {totalScore >= 90 ? "Ma šāʾ Allāh!" :
                  totalScore >= 75 ? "Sehr gut!"     :
                  totalScore >= 50 ? "Noch mal üben." : "Versuch es nochmal."}
               </Text>
               <View style={styles.modeRow}>
-                <View style={[
-                  styles.modeChip,
-                  timings.mode === "ws" ? styles.modeChipWs : styles.modeChipUnknown,
-                ]}>
-                  <Text style={styles.modeChipText}>
+                <View
+                  style={[
+                    styles.modeChip,
+                    timings.mode === "ws"
+                      ? { backgroundColor: c.scanning.bg, borderColor: c.scanning.border }
+                      : { backgroundColor: c.pending.bg, borderColor: c.pending.border },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.modeChipText,
+                      { color: timings.mode === "ws" ? c.scanning.text : c.pending.text },
+                    ]}
+                  >
                     {timings.mode === "ws" ? "⚡ WebSocket-Stream" : "?"}
                   </Text>
                 </View>
                 {serverMs != null && (
-                  <Text style={styles.metaText}>Server {serverMs} ms</Text>
+                  <Text style={[styles.metaText, { color: c.textMuted }]}>Server {serverMs} ms</Text>
                 )}
               </View>
 
               {/* Latenz-Analyse — immer sichtbar wenn irgendein Timing da ist */}
               {(timings.client || timings.done?.timings) && (
-                <View style={styles.diagBox}>
-                  <Text style={styles.diagTitle}>Latenz-Analyse</Text>
-                  <DiagLine label="Modus"                value={timings.mode ?? "?"} bold />
+                <View style={[styles.diagBox, { backgroundColor: c.background, borderColor: c.border }]}>
+                  <Text style={[styles.diagTitle, { color: c.text }]}>Latenz-Analyse</Text>
+                  <DiagLine label="Modus"                value={timings.mode ?? "?"} bold colors={c} />
                   {timings.client && (
                     <>
-                      <DiagLine label="Audio (Handy → Bytes)"    value={`${timings.client.bytes_read_ms} ms`} extra={`${Math.round((timings.client.bytes ?? 0) / 1024)} KB`} />
-                      <DiagLine label="WS send-Aufruf"           value={`${timings.client.ws_send_ms} ms`} />
-                      <DiagLine label="→ Erstes Server-Frame"    value={`${timings.client.first_frame_ms} ms`} bold />
-                      <DiagLine label="→ Letztes Frame (done)"   value={`${timings.client.last_frame_ms} ms`} bold />
+                      <DiagLine label="Audio (Handy → Bytes)"    value={`${timings.client.bytes_read_ms} ms`} extra={`${Math.round((timings.client.bytes ?? 0) / 1024)} KB`} colors={c} />
+                      <DiagLine label="WS send-Aufruf"           value={`${timings.client.ws_send_ms} ms`} colors={c} />
+                      <DiagLine label="→ Erstes Server-Frame"    value={`${timings.client.first_frame_ms} ms`} bold colors={c} />
+                      <DiagLine label="→ Letztes Frame (done)"   value={`${timings.client.last_frame_ms} ms`} bold colors={c} />
                     </>
                   )}
                   {timings.done?.timings && (
                     <>
-                      <DiagLine label="Audio-Länge (Kind spricht)" value={`${timings.done.timings.audio_ms ?? "?"} ms`} />
-                      <DiagLine label="Bytes empfangen (Server)"   value={`${timings.done.timings.bytes_recv_ms ?? "?"} ms`} />
-                      <DiagLine label="Preprocess (CPU)"           value={`${timings.done.timings.preprocess_ms} ms`} />
-                      <DiagLine label="ASR (GPU)"                  value={`${timings.done.timings.asr_ms} ms`} bold />
-                      <DiagLine label="Forced-Align"               value={`${timings.done.timings.align_ms} ms`} />
-                      <DiagLine label="Wort-Scoring"               value={`${timings.done.timings.score_ms} ms`} />
+                      <DiagLine label="Audio-Länge (Kind spricht)" value={`${timings.done.timings.audio_ms ?? "?"} ms`} colors={c} />
+                      <DiagLine label="Bytes empfangen (Server)"   value={`${timings.done.timings.bytes_recv_ms ?? "?"} ms`} colors={c} />
+                      <DiagLine label="Preprocess (CPU)"           value={`${timings.done.timings.preprocess_ms} ms`} colors={c} />
+                      <DiagLine label="ASR (GPU)"                  value={`${timings.done.timings.asr_ms} ms`} bold colors={c} />
+                      <DiagLine label="Forced-Align"               value={`${timings.done.timings.align_ms} ms`} colors={c} />
+                      <DiagLine label="Wort-Scoring"               value={`${timings.done.timings.score_ms} ms`} colors={c} />
                     </>
                   )}
                   {!timings.done?.timings && (
-                    <Text style={styles.diagMutedNote}>
+                    <Text style={[styles.diagMutedNote, { color: c.textMuted }]}>
                       Server-Timings fehlen — vermutlich WS-Fehler vor dem done-Frame.
                     </Text>
                   )}
@@ -408,7 +439,7 @@ export default function QuranAyahScreen() {
               )}
 
               {!timings.client && !timings.done?.timings && (
-                <Text style={styles.diagMutedNote}>
+                <Text style={[styles.diagMutedNote, { color: c.textMuted }]}>
                   Keine Timings verfügbar (weder Client noch Server).
                 </Text>
               )}
@@ -416,8 +447,8 @@ export default function QuranAyahScreen() {
           )}
           {phase === "error" && (
             <View style={styles.row}>
-              <Ionicons name="warning" size={20} color="#ef4444" />
-              <Text style={[styles.hint, { color: "#ef4444" }]}>{errMsg}</Text>
+              <Ionicons name="warning" size={20} color={c.bad.base} />
+              <Text style={[styles.hint, { color: c.bad.text }]}>{errMsg}</Text>
             </View>
           )}
         </View>
@@ -427,17 +458,23 @@ export default function QuranAyahScreen() {
       <DebugOverlay />
 
       {/* Aktions-Leiste */}
-      <View style={[styles.actionBar, { paddingBottom: 12 + insets.bottom }]}>
+      <View
+        style={[
+          styles.actionBar,
+          { backgroundColor: c.surface, borderTopColor: c.border, paddingBottom: 12 + insets.bottom },
+        ]}
+      >
         <Pressable
           onPress={goPrev}
           disabled={busy || ayahIdx <= 0}
           style={({ pressed }) => [
             styles.secondaryBtn,
+            { backgroundColor: c.surfaceMuted },
             (busy || ayahIdx <= 0) && styles.btnDisabled,
             pressed && styles.pressed,
           ]}
         >
-          <Ionicons name="chevron-back" size={20} color="#334155" />
+          <Ionicons name="chevron-back" size={20} color={c.text} />
         </Pressable>
 
         <Pressable
@@ -445,12 +482,13 @@ export default function QuranAyahScreen() {
           disabled={busy}
           style={({ pressed }) => [
             styles.secondaryBtn,
+            { backgroundColor: c.surfaceMuted },
             busy && styles.btnDisabled,
             pressed && styles.pressed,
           ]}
         >
-          <Ionicons name="volume-high" size={22} color="#2563eb" />
-          <Text style={styles.secondaryText}>Anhören</Text>
+          <Ionicons name="volume-high" size={22} color={c.info} />
+          <Text style={[styles.secondaryText, { color: c.text }]}>Anhören</Text>
         </Pressable>
 
         {phase === "listening" ? (
@@ -458,28 +496,29 @@ export default function QuranAyahScreen() {
             onPress={rec.stop}
             style={({ pressed }) => [
               styles.primaryBtnBig,
-              styles.primaryBtnStop,
+              { backgroundColor: c.good.base },
               pressed && styles.pressed,
             ]}
           >
-            <Ionicons name="checkmark" size={26} color="#ffffff" />
-            <Text style={styles.primaryBtnBigText}>Fertig</Text>
+            <Ionicons name="checkmark" size={26} color={c.onPrimary} />
+            <Text style={[styles.primaryBtnBigText, { color: c.onPrimary }]}>Fertig</Text>
           </Pressable>
         ) : phase === "result" || phase === "error" ? (
           <Pressable
             onPress={startRecord}
             style={({ pressed }) => [
               styles.primaryBtnBig,
+              { backgroundColor: c.recording },
               pressed && styles.pressed,
             ]}
           >
-            <Ionicons name="refresh" size={24} color="#ffffff" />
-            <Text style={styles.primaryBtnBigText}>Nochmal</Text>
+            <Ionicons name="refresh" size={24} color={c.onPrimary} />
+            <Text style={[styles.primaryBtnBigText, { color: c.onPrimary }]}>Nochmal</Text>
           </Pressable>
         ) : (
-          <View style={[styles.primaryBtnBig, styles.primaryBtnQuiet]}>
-            <ActivityIndicator size="small" color="#94a3b8" />
-            <Text style={[styles.primaryBtnBigText, { color: "#94a3b8" }]}>
+          <View style={[styles.primaryBtnBig, { backgroundColor: c.surfaceMuted }]}>
+            <ActivityIndicator size="small" color={c.pending.text} />
+            <Text style={[styles.primaryBtnBigText, { color: c.pending.text }]}>
               {phase === "tts" ? "Höre zu…" : phase === "scoring" ? "Bewertung…" : "Bereit"}
             </Text>
           </View>
@@ -490,11 +529,12 @@ export default function QuranAyahScreen() {
           disabled={busy}
           style={({ pressed }) => [
             styles.secondaryBtn,
+            { backgroundColor: c.surfaceMuted },
             busy && styles.btnDisabled,
             pressed && styles.pressed,
           ]}
         >
-          <Ionicons name="chevron-forward" size={20} color="#334155" />
+          <Ionicons name="chevron-forward" size={20} color={c.text} />
         </Pressable>
       </View>
     </SafeAreaView>
@@ -502,7 +542,7 @@ export default function QuranAyahScreen() {
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: "#f8fafc" },
+  root: { flex: 1 },
   center: { flex: 1, alignItems: "center", justifyContent: "center", padding: 32 },
 
   header: {
@@ -512,32 +552,29 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   headerCenter: { flex: 1, alignItems: "center" },
-  headerAr: { fontSize: 20, fontWeight: "700", color: "#0f172a", writingDirection: "rtl" },
-  headerMeta: { fontSize: 12, color: "#64748b", marginTop: 2 },
+  headerAr: { fontSize: 20, fontWeight: "700", writingDirection: "rtl" },
+  headerMeta: { fontSize: 12, marginTop: 2 },
 
   iconBtn: {
     width: 40, height: 40, borderRadius: 20,
-    backgroundColor: "#ffffff", alignItems: "center", justifyContent: "center",
-    borderWidth: 1, borderColor: "#e2e8f0",
+    alignItems: "center", justifyContent: "center",
+    borderWidth: 1,
   },
   pressed: { opacity: 0.75 },
 
   progressBg: {
-    height: 6, backgroundColor: "#e2e8f0",
+    height: 6,
     marginHorizontal: 16, marginTop: 4, borderRadius: 3, overflow: "hidden",
   },
-  progressFill: { height: 6, backgroundColor: "#22c55e" },
+  progressFill: { height: 6 },
 
   scroll: { flex: 1 },
   scrollContent: { padding: 16, paddingTop: 20, alignItems: "stretch" },
 
   ayahCard: {
-    backgroundColor: "#ffffff",
     borderRadius: 24,
     borderWidth: 1,
-    borderColor: "#e2e8f0",
     padding: 16,
-    shadowColor: "#000",
     shadowOpacity: 0.05,
     shadowRadius: 12,
     shadowOffset: { width: 0, height: 4 },
@@ -551,12 +588,12 @@ const styles = StyleSheet.create({
   },
   ayahBadge: {
     minWidth: 32, height: 32, borderRadius: 16,
-    backgroundColor: "#eef2ff", borderColor: "#c7d2fe", borderWidth: 1,
+    borderWidth: 1,
     alignItems: "center", justifyContent: "center",
     paddingHorizontal: 8,
   },
-  ayahBadgeText: { color: "#4338ca", fontWeight: "800", fontSize: 14 },
-  ayahHeaderText: { color: "#64748b", fontSize: 13 },
+  ayahBadgeText: { fontWeight: "800", fontSize: 14 },
+  ayahHeaderText: { fontSize: 13 },
 
   ayahWordsWrap: {
     flexDirection: "row-reverse",
@@ -572,15 +609,13 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   row: { flexDirection: "row", alignItems: "center", gap: 8 },
-  hint: { color: "#334155", fontSize: 15, textAlign: "center" },
-  hintSub: { color: "#64748b", fontSize: 12, textAlign: "center" },
+  hint: { fontSize: 15, textAlign: "center" },
+  hintSub: { fontSize: 12, textAlign: "center" },
 
   resultBlock: { alignItems: "center", position: "relative" },
-  scoreBig: {
-    fontSize: 56, fontWeight: "900", color: "#0f172a", letterSpacing: -1,
-  },
-  scoreLabel: { fontSize: 16, fontWeight: "600", color: "#334155", marginTop: 4 },
-  metaText: { fontSize: 11, color: "#94a3b8", marginTop: 4, fontWeight: "600" },
+  scoreBig: { fontSize: 56, fontWeight: "900", letterSpacing: -1 },
+  scoreLabel: { fontSize: 16, fontWeight: "600", marginTop: 4 },
+  metaText: { fontSize: 11, marginTop: 4, fontWeight: "600" },
 
   modeRow: {
     flexDirection: "row",
@@ -594,26 +629,20 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     borderWidth: 1,
   },
-  modeChipWs:      { backgroundColor: "#ecfeff", borderColor: "#67e8f9" },
-  modeChipHttp:    { backgroundColor: "#fef3c7", borderColor: "#fbbf24" },
-  modeChipUnknown: { backgroundColor: "#f1f5f9", borderColor: "#cbd5e1" },
-  modeChipText:    { fontSize: 12, fontWeight: "800", color: "#0f172a" },
-  diagMutedNote: { color: "#94a3b8", fontStyle: "italic", fontSize: 11, marginTop: 6, textAlign: "center" },
+  modeChipText: { fontSize: 12, fontWeight: "800" },
+  diagMutedNote: { fontStyle: "italic", fontSize: 11, marginTop: 6, textAlign: "center" },
 
   diagBox: {
     marginTop: 16,
     width: "100%",
     padding: 12,
     borderRadius: 12,
-    backgroundColor: "#f8fafc",
     borderWidth: 1,
-    borderColor: "#e2e8f0",
     gap: 4,
   },
   diagTitle: {
     fontSize: 12,
     fontWeight: "800",
-    color: "#0f172a",
     marginBottom: 6,
     letterSpacing: 0.5,
     textTransform: "uppercase",
@@ -623,10 +652,10 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
   },
-  diagLabel: { fontSize: 12, color: "#475569", flexShrink: 1 },
-  diagValue: { fontSize: 12, color: "#0f172a", fontVariant: ["tabular-nums"], fontWeight: "600" },
+  diagLabel: { fontSize: 12, flexShrink: 1 },
+  diagValue: { fontSize: 12, fontVariant: ["tabular-nums"], fontWeight: "600" },
   diagBold: { fontWeight: "800" },
-  diagMuted: { color: "#94a3b8", fontStyle: "italic" },
+  diagMuted: { fontStyle: "italic" },
 
   actionBar: {
     flexDirection: "row",
@@ -635,9 +664,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingTop: 10,
     gap: 8,
-    backgroundColor: "#ffffff",
     borderTopWidth: 1,
-    borderTopColor: "#e2e8f0",
   },
   secondaryBtn: {
     flexDirection: "row",
@@ -646,9 +673,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 12,
     borderRadius: 14,
-    backgroundColor: "#f1f5f9",
   },
-  secondaryText: { color: "#334155", fontSize: 14, fontWeight: "700" },
+  secondaryText: { fontSize: 14, fontWeight: "700" },
   primaryBtnBig: {
     flex: 1,
     flexDirection: "row",
@@ -658,19 +684,16 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     paddingVertical: 14,
     borderRadius: 16,
-    backgroundColor: "#ef4444",
   },
-  primaryBtnStop: { backgroundColor: "#16a34a" },
-  primaryBtnQuiet: { backgroundColor: "#f1f5f9" },
-  primaryBtnBigText: { color: "#ffffff", fontSize: 16, fontWeight: "800" },
+  primaryBtnBigText: { fontSize: 16, fontWeight: "800" },
   btnDisabled: { opacity: 0.4 },
 
-  headline: { fontSize: 20, fontWeight: "800", color: "#0f172a", marginBottom: 8 },
-  sub: { color: "#64748b", textAlign: "center", marginBottom: 16 },
+  headline: { fontSize: 20, fontWeight: "800", marginBottom: 8 },
+  sub: { textAlign: "center", marginBottom: 16 },
   primaryBtn: {
     marginTop: 12,
     paddingHorizontal: 20, paddingVertical: 12,
-    backgroundColor: "#2563eb", borderRadius: 14,
+    borderRadius: 14,
   },
-  primaryBtnText: { color: "white", fontWeight: "800", fontSize: 16 },
+  primaryBtnText: { fontWeight: "800", fontSize: 16 },
 });

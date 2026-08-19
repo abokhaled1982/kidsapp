@@ -1,9 +1,11 @@
 import { useEffect, useRef } from "react";
 import { View, Animated, StyleSheet, Easing } from "react-native";
+import { useTheme } from "@/store/useTheme";
 
 type Props = { active: boolean; level: number };
 
 export function PulsingMic({ active, level }: Props) {
+  const c = useTheme();
   const scale = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
@@ -30,7 +32,9 @@ export function PulsingMic({ active, level }: Props) {
           styles.circle,
           {
             transform: [{ scale }],
-            backgroundColor: loud ? "#ef4444" : "#f43f5e",
+            // Laut = die klare Aufnahme-Farbe, leise = der ruhigere Sekundaerton.
+            backgroundColor: loud ? c.recording : c.secondary,
+            shadowColor: c.text,
           },
         ]}
       >
@@ -48,7 +52,6 @@ const styles = StyleSheet.create({
     borderRadius: 45,
     alignItems: "center",
     justifyContent: "center",
-    shadowColor: "#000",
     shadowOpacity: 0.15,
     shadowRadius: 8,
     shadowOffset: { width: 0, height: 4 },

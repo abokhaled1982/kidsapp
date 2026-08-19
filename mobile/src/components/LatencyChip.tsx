@@ -1,5 +1,6 @@
 import { View, Text, StyleSheet } from "react-native";
 import type { AssessMeta } from "@/lib/api";
+import { useTheme } from "@/store/useTheme";
 
 /**
  * Live-Diagnose-Chip unter dem Ergebnis: zeigt Uebertragungs-Modus,
@@ -14,24 +15,25 @@ export function LatencyChip({
   meta?: AssessMeta;
   serverMs?: number;
 }) {
+  const c = useTheme();
   if (!meta) return null;
   const modeLabel = "⚡ WebSocket";
   const netMs = serverMs !== undefined ? Math.max(0, meta.totalMs - serverMs) : undefined;
+  const netColor =
+    netMs === undefined ? c.text : netMs > 500 ? c.bad.text : netMs > 200 ? c.medium.text : c.good.text;
   return (
-    <View style={styles.wrap}>
-      <Text style={styles.txt}>{modeLabel}</Text>
-      <Text style={styles.sep}>·</Text>
-      <Text style={styles.txt}>Server {serverMs ?? "?"} ms</Text>
+    <View style={[styles.wrap, { backgroundColor: c.surfaceMuted, borderColor: c.border }]}>
+      <Text style={[styles.txt, { color: c.text }]}>{modeLabel}</Text>
+      <Text style={[styles.sep, { color: c.textMuted }]}>·</Text>
+      <Text style={[styles.txt, { color: c.text }]}>Server {serverMs ?? "?"} ms</Text>
       {netMs !== undefined && (
         <>
-          <Text style={styles.sep}>·</Text>
-          <Text style={[styles.txt, netMs > 500 ? styles.bad : netMs > 200 ? styles.warn : styles.ok]}>
-            Netz {netMs} ms
-          </Text>
+          <Text style={[styles.sep, { color: c.textMuted }]}>·</Text>
+          <Text style={[styles.txt, { color: netColor }]}>Netz {netMs} ms</Text>
         </>
       )}
-      <Text style={styles.sep}>·</Text>
-      <Text style={styles.txt}>Total {meta.totalMs} ms</Text>
+      <Text style={[styles.sep, { color: c.textMuted }]}>·</Text>
+      <Text style={[styles.txt, { color: c.text }]}>Total {meta.totalMs} ms</Text>
     </View>
   );
 }
@@ -45,15 +47,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 999,
-    backgroundColor: "#f1f5f9",
     borderWidth: 1,
-    borderColor: "#e2e8f0",
     flexWrap: "wrap",
     justifyContent: "center",
   },
-  txt: { color: "#334155", fontSize: 11, fontWeight: "600" },
-  sep: { color: "#94a3b8", fontSize: 11 },
-  ok:   { color: "#16a34a" },
-  warn: { color: "#eab308" },
-  bad:  { color: "#dc2626" },
+  txt: { fontSize: 11, fontWeight: "600" },
+  sep: { fontSize: 11 },
 });

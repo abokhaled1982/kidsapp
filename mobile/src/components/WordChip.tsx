@@ -1,13 +1,14 @@
 // Einzelner Wort-Chip mit animierter Farb- und Score-Uebergang.
 // Zustaende:
-//   pending   – grau, noch nicht gesprochen / bewertet
+//   pending   – ruhig, noch nicht gesprochen / bewertet
 //   scanning  – Shimmer waehrend Server rechnet
-//   good      – gruen (Score ≥ 75)
-//   medium    – gelb (50 – 74)
-//   bad       – rot (< 50)
+//   good      – Score ≥ 75
+//   medium    – 50 – 74
+//   bad       – < 50
+// Die konkreten Farben kommen aus dem gewaehlten Theme (useTheme).
 
-import { useEffect } from "react";
-import { View, Text, StyleSheet, Pressable } from "react-native";
+import { useEffect, useMemo } from "react";
+import { Text, StyleSheet, Pressable } from "react-native";
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
@@ -19,19 +20,15 @@ import Animated, {
   cancelAnimation,
 } from "react-native-reanimated";
 
-export type WordChipState = "pending" | "scanning" | "good" | "medium" | "bad";
+import { useTheme } from "@/store/useTheme";
 
-const COLORS: Record<WordChipState, { bg: string; border: string; text: string }> = {
-  pending: { bg: "#f8fafc", border: "#e2e8f0", text: "#334155" },
-  scanning:{ bg: "#eff6ff", border: "#bfdbfe", text: "#1d4ed8" },
-  good:    { bg: "#ecfdf5", border: "#86efac", text: "#166534" },
-  medium:  { bg: "#fef3c7", border: "#fcd34d", text: "#92400e" },
-  bad:     { bg: "#fef2f2", border: "#fca5a5", text: "#991b1b" },
-};
+export type WordChipState = "pending" | "scanning" | "good" | "medium" | "bad";
 
 const STATE_INDEX: Record<WordChipState, number> = {
   pending: 0, scanning: 1, good: 2, medium: 3, bad: 4,
 };
+
+const RAMP = [0, 1, 2, 3, 4];
 
 export function WordChip({
   word,
@@ -44,9 +41,26 @@ export function WordChip({
   score?: number;
   onPress?: () => void;
 }) {
+  const c = useTheme();
   const t   = useSharedValue<number>(STATE_INDEX[state]);
   const pop = useSharedValue<number>(1);
   const sh  = useSharedValue<number>(0);
+
+  // Die Farbreihen werden im Render gebaut und als Dependency in das
+  // Worklet gegeben — sonst friert das Worklet die Farben des ersten
+  // Themes ein und ein Theme-Wechsel wuerde nicht ankommen.
+  const bgs = useMemo(
+    () => [c.pending.bg, c.scanning.bg, c.good.bg, c.medium.bg, c.bad.bg],
+    [c],
+  );
+  const borders = useMemo(
+    () => [c.pending.border, c.scanning.border, c.good.border, c.medium.border, c.bad.border],
+    [c],
+  );
+  const texts = useMemo(
+    () => [c.pending.text, c.scanning.text, c.good.text, c.medium.text, c.bad.text],
+    [c],
+  );
 
   useEffect(() => {
     // Farbuebergang zum neuen Zustand
@@ -74,32 +88,20 @@ export function WordChip({
     }
   }, [state, t, pop, sh]);
 
-  const animStyle = useAnimatedStyle(() => {
-    const bg = interpolateColor(
-      t.value,
-      [0, 1, 2, 3, 4],
-      [COLORS.pending.bg, COLORS.scanning.bg, COLORS.good.bg, COLORS.medium.bg, COLORS.bad.bg],
-    );
-    const border = interpolateColor(
-      t.value,
-      [0, 1, 2, 3, 4],
-      [COLORS.pending.border, COLORS.scanning.border, COLORS.good.border, COLORS.medium.border, COLORS.bad.border],
-    );
-    return {
-      backgroundColor: bg,
-      borderColor: border,
+  const animStyle = useAnimatedStyle(
+    () => ({
+      backgroundColor: interpolateColor(t.value, RAMP, bgs),
+      borderColor: interpolateColor(t.value, RAMP, borders),
       transform: [{ scale: pop.value }],
       opacity: 0.85 + sh.value * 0.15,
-    };
-  });
+    }),
+    [bgs, borders],
+  );
 
-  const animTextStyle = useAnimatedStyle(() => ({
-    color: interpolateColor(
-      t.value,
-      [0, 1, 2, 3, 4],
-      [COLORS.pending.text, COLORS.scanning.text, COLORS.good.text, COLORS.medium.text, COLORS.bad.text],
-    ),
-  }));
+  const animTextStyle = useAnimatedStyle(
+    () => ({ color: interpolateColor(t.value, RAMP, texts) }),
+    [texts],
+  );
 
   const showScore = state === "good" || state === "medium" || state === "bad";
 
@@ -113,7 +115,7 @@ export function WordChip({
           {word}
         </Animated.Text>
         {showScore ? (
-          <Text style={[styles.score, { color: COLORS[state].text }]}>
+          <Text style={[styles.score, { color: c[state].text }]}>
             {Math.round(score ?? 0)}
           </Text>
         ) : null}

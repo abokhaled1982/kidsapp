@@ -7,11 +7,13 @@ import { WORDS } from "@/data/words";
 import { CategoryCard } from "@/components/CategoryCard";
 import { useProgress, level } from "@/store/useProgress";
 import { useProfile } from "@/store/useProfile";
+import { useTheme } from "@/store/useTheme";
 import { initialProfileScreen } from "@/store/profileFlow";
 import OnboardingScreen from "../onboarding";
 
 export default function AussprachHome() {
   const router = useRouter();
+  const c = useTheme();
   const profile = useProfile((s) => s.profile);
   const hasHydrated = useProfile((s) => s.hasHydrated);
   const xp = useProgress((s) => s.xp);
@@ -23,8 +25,8 @@ export default function AussprachHome() {
 
   if (screen === "loading") {
     return (
-      <View style={{ flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: "#f8fafc" }}>
-        <ActivityIndicator color="#2474d2" />
+      <View style={[styles.loading, { backgroundColor: c.background }]}>
+        <ActivityIndicator color={c.primary} />
       </View>
     );
   }
@@ -34,30 +36,36 @@ export default function AussprachHome() {
   }
 
   return (
-    <SafeAreaView style={styles.root} edges={["top"]}>
+    <SafeAreaView style={[styles.root, { backgroundColor: c.background }]} edges={["top"]}>
       <View style={styles.headerRow}>
-        <View>
-          <Text style={styles.hello}>Salām, {profile.name} 👋</Text>
-          <Text style={styles.sub}>{profile.level}. Lernlevel · Lass uns Arabisch lernen!</Text>
+        <View style={styles.headerText}>
+          <Text style={[styles.hello, { color: c.text }]}>Salām, {profile.name} 👋</Text>
+          <Text style={[styles.sub, { color: c.textMuted }]}>
+            {profile.level}. Lernlevel · Lass uns Arabisch lernen!
+          </Text>
         </View>
-        <Pressable onPress={() => router.push("/settings" as any)} style={styles.gearBtn}>
-          <Ionicons name="settings-outline" size={22} color="#334155" />
+        <Pressable
+          onPress={() => router.push("/settings" as any)}
+          style={[styles.gearBtn, { backgroundColor: c.surface, borderColor: c.border }]}
+          accessibilityLabel="Einstellungen"
+        >
+          <Ionicons name="settings-outline" size={22} color={c.textMuted} />
         </Pressable>
       </View>
 
-      <View style={styles.levelCard}>
-        <Text style={styles.levelLabel}>Dein Level</Text>
+      <View style={[styles.levelCard, { backgroundColor: c.primary }]}>
+        <Text style={[styles.levelLabel, { color: c.onPrimary }]}>Dein Level</Text>
         <View style={styles.levelRow}>
-          <Text style={styles.levelValue}>Lvl {lv}</Text>
+          <Text style={[styles.levelValue, { color: c.onPrimary }]}>Lvl {lv}</Text>
           <View style={styles.stats}>
-            <Stat label="XP" value={xp} />
-            <Stat label="Sterne" value={stars} />
+            <Stat label="XP" value={xp} color={c.onPrimary} />
+            <Stat label="Sterne" value={stars} color={c.onPrimary} />
           </View>
         </View>
       </View>
 
       <ScrollView contentContainerStyle={styles.scroll}>
-        <Text style={styles.sectionTitle}>Kategorien</Text>
+        <Text style={[styles.sectionTitle, { color: c.text }]}>Kategorien</Text>
         <View style={styles.grid}>
           {CATEGORIES.map((cat) => {
             const items = WORDS[cat.id] ?? [];
@@ -79,33 +87,34 @@ export default function AussprachHome() {
   );
 }
 
-function Stat({ label, value }: { label: string; value: number }) {
+function Stat({ label, value, color }: { label: string; value: number; color: string }) {
   return (
-    <View style={{ alignItems: "flex-end" }}>
-      <Text style={{ color: "white", fontSize: 20, fontWeight: "700" }}>{value}</Text>
-      <Text style={{ color: "rgba(255,255,255,0.8)", fontSize: 12 }}>{label}</Text>
+    <View style={styles.stat}>
+      <Text style={[styles.statValue, { color }]}>{value}</Text>
+      <Text style={[styles.statLabel, { color, opacity: 0.8 }]}>{label}</Text>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: "#f8fafc" },
+  loading: { alignItems: "center", flex: 1, justifyContent: "center" },
+  root: { flex: 1 },
   headerRow: {
     paddingHorizontal: 20,
     paddingVertical: 12,
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
+    gap: 12,
   },
-  hello: { fontSize: 24, fontWeight: "700", color: "#0f172a" },
-  sub: { color: "#64748b", marginTop: 2 },
+  headerText: { flexShrink: 1 },
+  hello: { fontSize: 24, fontWeight: "700" },
+  sub: { marginTop: 2 },
   gearBtn: {
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: "white",
     borderWidth: 1,
-    borderColor: "#e2e8f0",
     alignItems: "center",
     justifyContent: "center",
   },
@@ -114,19 +123,21 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     padding: 16,
     borderRadius: 22,
-    backgroundColor: "#3b82f6",
   },
-  levelLabel: { color: "rgba(255,255,255,0.9)", fontSize: 13 },
+  levelLabel: { fontSize: 13, opacity: 0.9 },
   levelRow: {
     marginTop: 4,
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "flex-end",
   },
-  levelValue: { color: "white", fontSize: 32, fontWeight: "800" },
+  levelValue: { fontSize: 32, fontWeight: "800" },
   stats: { flexDirection: "row", gap: 16 },
+  stat: { alignItems: "flex-end" },
+  statValue: { fontSize: 20, fontWeight: "700" },
+  statLabel: { fontSize: 12 },
   scroll: { padding: 20, paddingTop: 4, gap: 12 },
-  sectionTitle: { fontSize: 18, fontWeight: "700", color: "#0f172a", marginBottom: 4 },
+  sectionTitle: { fontSize: 18, fontWeight: "700", marginBottom: 4 },
   grid: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
   gridItem: { width: "47%" },
 });

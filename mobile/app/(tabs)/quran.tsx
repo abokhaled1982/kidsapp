@@ -7,6 +7,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { SURAHS } from "@/data/juzamma";
 import { useProgress } from "@/store/useProgress";
 import { useBackend } from "@/store/useBackend";
+import { useTheme } from "@/store/useTheme";
 
 const AR_DIGITS = ["٠", "١", "٢", "٣", "٤", "٥", "٦", "٧", "٨", "٩"];
 const toArabicNumber = (n: number) =>
@@ -14,6 +15,7 @@ const toArabicNumber = (n: number) =>
 
 export default function QuranScreen() {
   const router = useRouter();
+  const c = useTheme();
   const backendUrl = useBackend((s) => s.url);
   const wordsMastered = useProgress((s) => s.wordsMastered);
 
@@ -37,22 +39,22 @@ export default function QuranScreen() {
 
   if (!backendUrl) {
     return (
-      <SafeAreaView style={[styles.root, styles.center]}>
+      <SafeAreaView style={[styles.root, styles.center, { backgroundColor: c.background }]}>
         <Text style={styles.emoji}>🕌</Text>
-        <Text style={styles.title}>Qurʾān-Modus</Text>
-        <Text style={styles.sub}>Erst Backend einrichten.</Text>
-        <Pressable onPress={() => router.push("/settings" as any)} style={styles.primaryBtn}>
-          <Text style={styles.primaryBtnText}>Zu den Einstellungen</Text>
+        <Text style={[styles.title, { color: c.text }]}>Qurʾān-Modus</Text>
+        <Text style={[styles.sub, { color: c.textMuted }]}>Erst Backend einrichten.</Text>
+        <Pressable onPress={() => router.push("/settings" as any)} style={[styles.primaryBtn, { backgroundColor: c.primary }]}>
+          <Text style={[styles.primaryBtnText, { color: c.onPrimary }]}>Zu den Einstellungen</Text>
         </Pressable>
       </SafeAreaView>
     );
   }
 
   return (
-    <SafeAreaView style={styles.root} edges={["top", "left", "right"]}>
+    <SafeAreaView style={[styles.root, { backgroundColor: c.background }]} edges={["top", "left", "right"]}>
       <View style={styles.header}>
-        <Text style={styles.headline}>جُزْء عَمّ</Text>
-        <Text style={styles.subheadline}>Juzʾ ʿAmma — {SURAHS.length} Suren</Text>
+        <Text style={[styles.headline, { color: c.text }]}>جُزْء عَمّ</Text>
+        <Text style={[styles.subheadline, { color: c.textMuted }]}>Juzʾ ʿAmma — {SURAHS.length} Suren</Text>
       </View>
 
       <ScrollView contentContainerStyle={styles.list} showsVerticalScrollIndicator={false}>
@@ -63,30 +65,34 @@ export default function QuranScreen() {
             <Pressable
               key={s.n}
               onPress={() => router.push(`/quran/${s.n}` as any)}
-              style={({ pressed }) => [styles.card, pressed && styles.pressed]}
+              style={({ pressed }) => [
+                styles.card,
+                { backgroundColor: c.surface, borderColor: c.border, shadowColor: c.text },
+                pressed && styles.pressed,
+              ]}
             >
-              <View style={styles.numBadge}>
-                <Text style={styles.numText}>{toArabicNumber(s.n)}</Text>
+              <View style={[styles.numBadge, { backgroundColor: c.surfaceMuted, borderColor: c.primary }]}>
+                <Text style={[styles.numText, { color: c.primary }]}>{toArabicNumber(s.n)}</Text>
               </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.surahAr} allowFontScaling={false}>
+              <View style={styles.cardBody}>
+                <Text style={[styles.surahAr, { color: c.text }]} allowFontScaling={false}>
                   سُورَة {s.name_ar}
                 </Text>
-                <Text style={styles.surahMeta}>
+                <Text style={[styles.surahMeta, { color: c.textMuted }]}>
                   {s.translit} · {s.name_de} · {s.ayat.length - 1} Verse
                 </Text>
                 <View style={styles.progressWrap}>
-                  <View style={styles.progressBg}>
-                    <View style={[styles.progressFill, { width: `${pct}%` }]} />
+                  <View style={[styles.progressBg, { backgroundColor: c.surfaceMuted }]}>
+                    <View style={[styles.progressFill, { backgroundColor: c.good.base, width: `${pct}%` }]} />
                   </View>
-                  <Text style={styles.progressText}>{pct}%</Text>
+                  <Text style={[styles.progressText, { color: c.textMuted }]}>{pct}%</Text>
                 </View>
               </View>
-              <Ionicons name="chevron-forward" size={22} color="#94a3b8" />
+              <Ionicons name="chevron-forward" size={22} color={c.textMuted} />
             </Pressable>
           );
         })}
-        <Text style={styles.footNote}>
+        <Text style={[styles.footNote, { color: c.textMuted }]}>
           Weitere Suren werden kontinuierlich ergänzt.
         </Text>
       </ScrollView>
@@ -95,19 +101,18 @@ export default function QuranScreen() {
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: "#f8fafc" },
+  root: { flex: 1 },
   center: { flex: 1, alignItems: "center", justifyContent: "center", padding: 32 },
   emoji: { fontSize: 72, marginBottom: 16 },
-  title: { fontSize: 22, fontWeight: "700", color: "#0f172a" },
-  sub: { color: "#64748b", textAlign: "center", marginTop: 8 },
+  title: { fontSize: 22, fontWeight: "700" },
+  sub: { textAlign: "center", marginTop: 8 },
   primaryBtn: {
     marginTop: 16,
-    backgroundColor: "#3b82f6",
     paddingHorizontal: 20,
     paddingVertical: 12,
     borderRadius: 22,
   },
-  primaryBtnText: { color: "white", fontWeight: "700" },
+  primaryBtnText: { fontWeight: "700" },
 
   header: {
     paddingHorizontal: 20,
@@ -115,56 +120,51 @@ const styles = StyleSheet.create({
     paddingBottom: 8,
     alignItems: "center",
   },
-  headline: { fontSize: 34, color: "#0f172a", writingDirection: "rtl", lineHeight: 44 },
-  subheadline: { color: "#64748b", fontSize: 14, marginTop: 2 },
+  headline: { fontSize: 34, writingDirection: "rtl", lineHeight: 44 },
+  subheadline: { fontSize: 14, marginTop: 2 },
 
   list: { paddingHorizontal: 16, paddingBottom: 24, gap: 10 },
   card: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "white",
     borderRadius: 16,
+    borderWidth: 1,
     padding: 14,
     gap: 12,
-    shadowColor: "#0f172a",
     shadowOpacity: 0.05,
     shadowRadius: 8,
     shadowOffset: { width: 0, height: 2 },
     elevation: 1,
   },
+  cardBody: { flex: 1 },
   pressed: { opacity: 0.75, transform: [{ scale: 0.98 }] },
   numBadge: {
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: "#eef2ff",
     borderWidth: 2,
-    borderColor: "#c7d2fe",
     alignItems: "center",
     justifyContent: "center",
   },
-  numText: { color: "#4338ca", fontWeight: "800", fontSize: 18 },
+  numText: { fontWeight: "800", fontSize: 18 },
   surahAr: {
     fontSize: 22,
-    color: "#0f172a",
     writingDirection: "rtl",
     textAlign: "right",
   },
-  surahMeta: { color: "#64748b", fontSize: 12, marginTop: 2 },
+  surahMeta: { fontSize: 12, marginTop: 2 },
   progressWrap: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 6 },
   progressBg: {
     flex: 1,
     height: 6,
-    backgroundColor: "#e2e8f0",
     borderRadius: 3,
     overflow: "hidden",
   },
-  progressFill: { height: "100%", backgroundColor: "#22c55e" },
-  progressText: { fontSize: 11, color: "#64748b", fontWeight: "700", minWidth: 34, textAlign: "right" },
+  progressFill: { height: "100%" },
+  progressText: { fontSize: 11, fontWeight: "700", minWidth: 34, textAlign: "right" },
 
   footNote: {
     textAlign: "center",
-    color: "#94a3b8",
     fontSize: 12,
     marginTop: 16,
     fontStyle: "italic",

@@ -1,15 +1,18 @@
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { SafeAreaProvider } from "react-native-safe-area-context";
+import { useTheme } from "@/store/useTheme";
 
 export default function RootLayout() {
+  const c = useTheme();
+
   return (
     <SafeAreaProvider>
       <StatusBar style="dark" />
       <Stack
         screenOptions={{
           headerShown: false,
-          contentStyle: { backgroundColor: "#f8fafc" },
+          contentStyle: { backgroundColor: c.background },
         }}
       >
         <Stack.Screen name="(tabs)" />
