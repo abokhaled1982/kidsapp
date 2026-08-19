@@ -23,6 +23,7 @@ export type ServerWordTimings = {
   preprocess_ms?: number;
   asr_ms?: number;
   score_ms?: number;
+  server_ms?: number;
 };
 
 export type AssessResponse = {

@@ -207,6 +207,7 @@ class StreamSession {
               `send=${ws_send_ms}ms`,
               `rtt=${rtt_ms}ms`,
               `server=${serverMs}ms`,
+              data?.timings ? `pre=${data.timings.preprocess_ms ?? "?"}ms asr=${data.timings.asr_ms ?? "?"}ms score=${data.timings.score_ms ?? "?"}ms` : "",
               `net_only=${net_ms >= 0 ? net_ms + "ms" : "?"}`,
             );
             useDebug.getState().push("ws_word",
