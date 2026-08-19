@@ -35,6 +35,8 @@ export type AyahWordEvent = {
   score: number;
   units: Array<{
     label: string;
+    recognized?: string | null;
+    match?: boolean;
     score: number;
     confidence: number;
     llr?: number | null;

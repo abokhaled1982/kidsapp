@@ -29,6 +29,9 @@ export function LetterFeedback({ units }: { units: AssessUnit[] }) {
               ]}
             >
               <Text style={[styles.letter, { color }]}>{u.label}</Text>
+              {u.recognized && u.recognized !== u.label ? (
+                <Text style={styles.recognized}>→ {u.recognized}</Text>
+              ) : null}
               {hasHint ? (
                 <View style={styles.hintBadge}>
                   <Text style={styles.hintBadgeText}>{u.error_hint}</Text>
@@ -43,7 +46,7 @@ export function LetterFeedback({ units }: { units: AssessUnit[] }) {
         <View style={styles.hintList}>
           {hints.map(({ i, target, hint }) => (
             <Text key={`${target}-${i}`} style={styles.hintLine}>
-              Dein <Text style={styles.hintTarget}>{target}</Text> klang wie{" "}
+              Erwartet <Text style={styles.hintTarget}>{target}</Text>, erkannt{" "}
               <Text style={styles.hintWrong}>{hint}</Text>
             </Text>
           ))}
@@ -71,6 +74,7 @@ const styles = StyleSheet.create({
     position: "relative",
   },
   letter: { fontSize: 24, fontWeight: "700", writingDirection: "rtl" },
+  recognized: { color: "#b91c1c", fontSize: 16, fontWeight: "800", writingDirection: "rtl" },
   hintBadge: {
     position: "absolute",
     top: -8,
