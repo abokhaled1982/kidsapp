@@ -1,7 +1,6 @@
-"""Arabic Pronunciation Assessment — Modal-Deployment.
+"""Arabic Pronunciation Assessment — Modal CPU/OpenVINO deployment.
 
-1:1-Port aus wav2vec2_arabic_pronunciation.ipynb.
-Scoring-Logik (GOP + LLR + forced_align + Ayah-Streaming) unveraendert.
+OpenVINO performs the ASR forward on CPU. Torch remains for alignment and scoring.
 Colab/ngrok/cloudflared entfernt; ersetzt durch Modal-nativen ASGI-Endpoint.
 
 Deploy:
@@ -23,40 +22,39 @@ import modal
 
 APP_NAME      = "quran-asr"
 MODEL_ID      = "jonatasgrosman/wav2vec2-large-xlsr-53-arabic"
+OV_MODEL_DIR  = "/opt/models/wav2vec2_ar_fp32"
 HF_CACHE      = "/root/.cache/huggingface"
 AUTH_SECRET   = "quran-asr-auth"          # modal.Secret mit key AUTH_TOKEN
 
 
 def _preload_models() -> None:
-    """Laedt HF-Modelle waehrend Image-Build in die Layer.
-
-    Ergebnis: `.from_pretrained(...)` bei Container-Start liest nur noch von
-    lokaler Disk (kein HF-Hit), Cold-Start faellt ~30-40s -> ~5-8s.
-    Silero-VAD ist als Asset im Pip-Wheel enthalten, braucht keinen Preload.
-    """
+    """Exportiert OpenVINO IR waehrend des Image-Builds."""
     import os
     os.environ["HF_HOME"] = HF_CACHE
     os.environ["TRANSFORMERS_CACHE"] = HF_CACHE
-    from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
-    Wav2Vec2Processor.from_pretrained(MODEL_ID)
-    Wav2Vec2ForCTC.from_pretrained(MODEL_ID)
+    from optimum.intel import OVModelForCTC
+    from transformers import Wav2Vec2Processor
+    processor = Wav2Vec2Processor.from_pretrained(MODEL_ID)
+    model = OVModelForCTC.from_pretrained(MODEL_ID, export=True, compile=False)
+    model.save_pretrained(OV_MODEL_DIR)
+    processor.save_pretrained(OV_MODEL_DIR)
 
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("ffmpeg")
     .pip_install(
-        "torch==2.4.1",
-        "torchaudio==2.4.1",
-        "transformers==4.44.2",
-        "silero-vad==5.1.2",
-        "pydub==0.25.1",
-        "scipy==1.14.1",
-        "numpy==1.26.4",
-        "soundfile==0.12.1",
-        "fastapi==0.115.0",
-        "uvicorn[standard]==0.30.6",
-        "python-multipart==0.0.9",
+        "optimum-intel[openvino]",
+        "torch",
+        "torchaudio",
+        "transformers",
+        "silero-vad",
+        "pydub",
+        "scipy",
+        "numpy",
+        "fastapi",
+        "uvicorn[standard]",
+        "python-multipart",
     )
     .env({"HF_HOME": HF_CACHE, "TRANSFORMERS_CACHE": HF_CACHE})
     .run_function(_preload_models)        # Modelle in Image-Layer einbrennen
@@ -66,11 +64,10 @@ app       = modal.App(APP_NAME)
 
 
 # ---------------------------------------------------------------------------
-# GPU-Container: laedt Modelle einmal, serviert FastAPI (HTTP + WebSocket).
+# CPU-Container: OpenVINO-Forward, FastAPI HTTP + WebSocket.
 # ---------------------------------------------------------------------------
 
 @app.cls(
-    gpu="A10G",                       # ~60% schneller als L4 bei ~gleichem Preis.
     image=image,
     secrets=[modal.Secret.from_name(AUTH_SECRET)],
     min_containers=2,                 # 2 warm -> Redundanz + kein Single-Point-of-Failure.
@@ -80,21 +77,22 @@ app       = modal.App(APP_NAME)
     timeout=600,
     region="eu",                      # Latenz-Region: EU. Fuer US-User -> "us-east".
 )
-@modal.concurrent(max_inputs=1)  # 1 GPU-Forward pro Container -> keine Race auf Model-Weights.
+@modal.concurrent(max_inputs=1)  # Ein CPU-Forward pro Container vermeidet Request-Races.
 class ASR:
     @modal.enter()
     def load(self):
-        import io, os, re, time, unicodedata
+        import io, os, re, threading, time, unicodedata
         from collections import deque
         from typing import Any, Dict, Iterator, List, Optional
 
         import numpy as np
+        import openvino as ov
         import torch
         import torchaudio.functional as AF
         from pydub import AudioSegment
         from scipy.signal import butter, sosfiltfilt
         from silero_vad import load_silero_vad, get_speech_timestamps
-        from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+        from transformers import Wav2Vec2Processor
 
         # in self ablegen -> spaeter im ASGI-App / WS-Handler verfuegbar
         self.np = np
@@ -105,27 +103,35 @@ class ASR:
         self.time = time
         self.unicodedata = unicodedata
 
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cpu")
         self.SR = 16000
-        self.USE_FP16 = self.device.type == "cuda"
-        self.DTYPE = torch.float16 if self.USE_FP16 else torch.float32
+        self.USE_FP16 = False
+        self.DTYPE = torch.float32
+
+        self.N_THREADS = int(os.environ.get("OV_THREADS", max(1, min(8, os.cpu_count() or 1))))
+        self.N_THREADS = max(1, min(self.N_THREADS, os.cpu_count() or 1))
+        ov_config = {
+            "PERFORMANCE_HINT": "LATENCY",
+            "NUM_STREAMS": "1",
+            "INFERENCE_NUM_THREADS": self.N_THREADS,
+            "CACHE_DIR": os.environ.get("OV_CACHE_DIR", "/tmp/ov_cache"),
+        }
 
         # --- Modelle laden -----------------------------------------------------
-        self.asr_processor = Wav2Vec2Processor.from_pretrained(MODEL_ID)
-        self.asr_model = (
-            Wav2Vec2ForCTC.from_pretrained(MODEL_ID)
-            .to(device=self.device, dtype=self.DTYPE)
-            .eval()
+        self.asr_processor = Wav2Vec2Processor.from_pretrained(OV_MODEL_DIR)
+        compiled = ov.Core().compile_model(
+            f"{OV_MODEL_DIR}/openvino_model.xml", "CPU", ov_config
         )
+        self._ov_request = compiled.create_infer_request()
+        self._ov_input = compiled.input(0)
+        self._ov_output = compiled.output(0)
+        self._ov_lock = threading.Lock()
         self.ASR_VOCAB = self.asr_processor.tokenizer.get_vocab()
-        self.ASR_BLANK_ID = self.asr_model.config.pad_token_id
+        self.ASR_BLANK_ID = self.asr_processor.tokenizer.pad_token_id
         self.vad_model = load_silero_vad()
 
-        # --- Warm-up (2s Null-Audio, damit CUDA-JIT nicht ersten Call bremst) -
-        with torch.inference_mode():
-            _ = self.asr_model(
-                torch.zeros(1, 2 * self.SR, device=self.device, dtype=self.DTYPE)
-            ).logits
+        # Warm-up avoids model/shape compilation on the first child request.
+        self._ov_request.infer({self._ov_input: np.zeros((1, 2 * self.SR), dtype=np.float32)})
 
         # --- Signalkette-Konstanten -------------------------------------------
         self._HPF_SOS = butter(2, 80.0, btype="highpass", fs=self.SR, output="sos")
@@ -348,10 +354,12 @@ class ASR:
         torch = self.torch
         with torch.inference_mode():
             inputs = self.asr_processor(
-                audio, sampling_rate=self.SR, return_tensors="pt", padding=True
+                audio, sampling_rate=self.SR, return_tensors="np", padding=True
             )
-            input_values = inputs.input_values.to(device=self.device, dtype=self.DTYPE)
-            logits = self.asr_model(input_values).logits
+            values = inputs.input_values.astype(self.np.float32, copy=False)
+            with self._ov_lock:
+                logits = self._ov_request.infer({self._ov_input: values})[self._ov_output].copy()
+            logits = torch.from_numpy(logits)
             log_probs = torch.log_softmax(logits.float(), dim=-1).cpu()
             transcription = self.asr_processor.batch_decode(log_probs.argmax(dim=-1))[0]
         return log_probs, transcription
@@ -376,6 +384,15 @@ class ASR:
     def _sigmoid(self, x: float) -> float:
         return 1.0 / (1.0 + float(self.np.exp(-x)))
 
+    def _edit_ratio(self, expected: str, recognized: str) -> float:
+        row = list(range(len(recognized) + 1))
+        for expected_char in expected:
+            previous, row = row, [0]
+            for index, recognized_char in enumerate(recognized, 1):
+                row.append(min(row[-1] + 1, previous[index] + 1,
+                               previous[index - 1] + (expected_char != recognized_char)))
+        return row[-1] / max(1, len(expected))
+
     def _gop_score(self, log_probs, target_word: str, phon_meta=None):
         np = self.np
         target_ids = self._encode_target(target_word)
@@ -386,18 +403,21 @@ class ASR:
         targets = self.torch.tensor([target_ids], dtype=self.torch.int32)
         aligned, _ = self.AF.forced_align(log_probs, targets, blank=self.ASR_BLANK_ID)
         runs = self._runs_of_non_blank(aligned[0].tolist())
+        predictions = log_probs.argmax(dim=-1)[0]
         total_len = len(target_word)
         run_lens = [len(r) for r in runs] if runs else [1]
         mean_len = float(np.median(run_lens)) if run_lens else 1.0
         results = []
         for i, ch in enumerate(target_word):
             if i >= len(runs):
-                results.append({"label": ch, "score": 0.0, "confidence": 0.0,
+                results.append({"label": ch, "recognized": None, "match": False, "score": 0.0, "confidence": 0.0,
                                 "llr": -5.0, "error_hint": None,
                                 "articulation": 0.0, "tajweed": 0.0, "duration_ms": 0})
                 continue
             frames = runs[i]
             lp_frame = log_probs[0, frames]
+            recognized_id = int(predictions[frames].bincount(minlength=log_probs.shape[-1]).argmax())
+            recognized = self._ID_TO_CHAR.get(recognized_id)
 
             equiv_ids = self._equiv_ids(ch, i, total_len)
             target_lp = lp_frame[:, equiv_ids].max(dim=-1).values.mean().item()
@@ -429,12 +449,14 @@ class ASR:
             hint_final = error_hint if error_hint else tajweed_hint
 
             final = 0.75 * articulation + 0.25 * tajweed_score
+            equiv_chars = {self._ID_TO_CHAR.get(tid) for tid in equiv_ids}
+            match = recognized in equiv_chars
             results.append({
-                "label": ch,
+                "label": ch, "recognized": recognized, "match": match,
                 "score": float(np.clip(final, 0, 100)),
                 "confidence": conf,
                 "llr": float(llr),
-                "error_hint": hint_final,
+                "error_hint": hint_final or (recognized if recognized and not match else None),
                 "articulation": float(np.clip(articulation, 0, 100)),
                 "tajweed": float(np.clip(tajweed_score, 0, 100)),
                 "duration_ms": int(len(frames) * 20),
@@ -466,6 +488,9 @@ class ASR:
 
         t_score = self.time.perf_counter()
         units = self._gop_score(log_probs, target_clean, phon_meta=phon_meta)
+        recognized_clean = self._strip_diacritics(transcription.replace(" ", ""))
+        recognition_penalty = max(0.15, 1.0 - 0.75 * self._edit_ratio(target_clean, recognized_clean))
+        units = [{**unit, "score": float(unit["score"] * recognition_penalty)} for unit in units]
         total = float(self.np.mean([u["score"] for u in units])) if units else 0.0
         dt_score = int((self.time.perf_counter() - t_score) * 1000)
 
@@ -637,7 +662,7 @@ class ASR:
     @modal.asgi_app()
     def web(self):
         import asyncio, json, os
-        from typing import List, Optional
+        from typing import Dict, List, Optional
         from fastapi import (
             Depends, FastAPI, File, Form, Header, HTTPException, UploadFile,
             WebSocket, WebSocketDisconnect, status,
@@ -667,6 +692,8 @@ class ASR:
 
         class Unit(BaseModel):
             label: str
+            recognized: Optional[str] = None
+            match: bool = False
             score: float
             confidence: float
             llr: Optional[float] = None
@@ -678,6 +705,7 @@ class ASR:
             units: List[Unit]
             total: float
             duration_ms: int
+            timings: Optional[Dict[str, int]] = None
 
         api = FastAPI(title="Arabic Pronunciation API", version="2.0.0-modal")
         api.add_middleware(
@@ -693,6 +721,7 @@ class ASR:
                 "asr_model": MODEL_ID,
                 "vad": "Silero VAD 5",
                 "fp16": self.USE_FP16,
+                "openvino_threads": self.N_THREADS,
                 "endpoints": ["/assess (HTTP)", "/stream (WebSocket)", "/logs"],
             }
 
