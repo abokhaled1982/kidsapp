@@ -1,0 +1,24 @@
+# Prevent AI tools from reading these paths (saves tokens)
+
+# Virtual environments & dependencies
+.venv/
+mobile/node_modules/
+
+# Build outputs
+mobile/dist/
+mobile/.expo/
+
+# Large binary/research files
+*.ipynb
+*.mp4
+*.pdf
+*.crt
+*.key
+
+# Caches
+__pycache__/
+.ipynb_checkpoints/
+*.pyc
+
+# Git internals
+.git/

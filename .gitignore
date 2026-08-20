@@ -22,5 +22,15 @@ pretrained_models/
 # Logs
 *.log
 
-#node_modules
-mobile/node_modules/*
+# Node
+mobile/node_modules/
+
+# Expo build artifacts
+mobile/dist/
+mobile/.expo/
+
+# Secrets (should never be committed)
+*.key
+*.crt
+.env
+.env.local

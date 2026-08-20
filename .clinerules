@@ -1,0 +1,61 @@
+# Project: Quran Kids Arabic Pronunciation App
+# ─────────────────────────────────────────────
+
+## Architecture Overview
+
+This is a monorepo with three parts:
+- **mobile/** — React Native / Expo 54 app (TypeScript, Zustand, expo-router, Vitest)
+- **backend/** — Python FastAPI ASR service (`asr_app.py`, wav2vec2-large-xlsr-53-arabic)
+- **docs/** — Product requirements and research notes (German language)
+
+## Tech Stack
+
+| Layer    | Stack                                                        |
+|----------|--------------------------------------------------------------|
+| Mobile   | React Native 0.81, Expo 54, expo-router 6, Zustand 4, Vitest 4 |
+| Backend  | Python 3.12, FastAPI, wav2vec2 (Grosman XLSR-53 Arabic), torchaudio |
+| Testing  | Vitest (mobile), pytest (backend)                            |
+| Styling  | Inline styles / React Native StyleSheet (no CSS-in-JS lib)  |
+
+## Key Conventions
+
+- Mobile source lives in `mobile/src/` (components, store, lib, data, hooks)
+- App routes are in `mobile/app/` using expo-router file-based routing
+- State management: Zustand stores in `mobile/src/store/`
+- Tests: colocated `.test.ts` files next to source
+- Backend: single file `backend/asr_app.py` (FastAPI)
+- Docs are in German
+- All Arabic text must handle RTL correctly
+
+## Commands
+
+| Task                | Command                          | Working Dir |
+|---------------------|----------------------------------|-------------|
+| Run mobile          | `npx expo start`                 | mobile/     |
+| Run tests (mobile)  | `npm run test` or `vitest run`   | mobile/     |
+| Run backend         | `uvicorn asr_app:app --reload`   | backend/    |
+| Lint mobile         | `npm run lint`                   | mobile/     |
+
+## Important Files (read these before making changes)
+
+- `docs/mobile-kinder-app-anforderungen.md` — Full product requirements
+- `docs/backend-cpu-migration-und-scoring.md` — Backend architecture decisions
+- `mobile/src/store/` — All state logic
+- `backend/asr_app.py` — ASR scoring pipeline
+
+## Do NOT
+
+- Add new state management libraries (use Zustand)
+- Add CSS-in-JS libraries
+- Modify `.env.local` files
+- Add dependencies without explicit user approval
+- Re-read large files like notebooks (.ipynb) — they are research artifacts
+
+## Token-Saving Instructions for AI Assistants
+
+- Prefer targeted file reads over full-directory scans
+- Never read `node_modules/`, `.venv/`, `dist/`, `.expo/`, or `.ipynb` files
+- When editing, use precise small diffs — avoid rewriting entire files
+- Reference this file for architecture questions instead of re-exploring
+- For mobile work: start with `mobile/src/store/` and `mobile/app/`
+- For backend work: start with `backend/asr_app.py`
