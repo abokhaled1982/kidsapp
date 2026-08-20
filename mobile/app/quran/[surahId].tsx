@@ -415,6 +415,7 @@ export default function QuranAyahScreen() {
                   {timings.client && (
                     <>
                       <DiagLine label="Audio (Handy → Bytes)"    value={`${timings.client.bytes_read_ms} ms`} extra={`${Math.round((timings.client.bytes ?? 0) / 1024)} KB`} colors={c} />
+                      <DiagLine label="Format für den Server"    value={timings.client.wav16 ? "wav16 (Schnellpfad)" : "raw (Server dekodiert)"} extra={`Aufbereitung ${timings.client.prepare_ms} ms`} colors={c} />
                       <DiagLine label="WS send-Aufruf"           value={`${timings.client.ws_send_ms} ms`} colors={c} />
                       <DiagLine label="→ Erstes Server-Frame"    value={`${timings.client.first_frame_ms} ms`} bold colors={c} />
                       <DiagLine label="→ Letztes Frame (done)"   value={`${timings.client.last_frame_ms} ms`} bold colors={c} />

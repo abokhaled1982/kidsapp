@@ -14,17 +14,43 @@ im App-Settings-Screen ein. Kein Tunnel, keine Rotation, kein Keepalive-Hack.
 
 from __future__ import annotations
 
+import os
+
 import modal
 
 # ---------------------------------------------------------------------------
 # Image / App / Volume
 # ---------------------------------------------------------------------------
 
-APP_NAME      = "quran-asr"
+# Ohne gesetzte Umgebungsvariablen ist das hier exakt die Produktion.
+# Mit ihnen laesst sich eine zweite, eigene Instanz daneben stellen, um Latenz
+# zu messen, ohne die laufende App anzufassen:
+#   ASR_APP_NAME=quran-asr-bench ASR_MIN_CONTAINERS=0 ASR_BENCH=1 \
+#       modal deploy backend/asr_app.py
+APP_NAME       = os.environ.get("ASR_APP_NAME", "quran-asr")
+MIN_CONTAINERS = int(os.environ.get("ASR_MIN_CONTAINERS", "2"))
+BENCH_DEPLOY   = os.environ.get("ASR_BENCH", "") == "1"
+
 MODEL_ID      = "jonatasgrosman/wav2vec2-large-xlsr-53-arabic"
 OV_MODEL_DIR  = "/opt/models/wav2vec2_ar_fp32"
 HF_CACHE      = "/root/.cache/huggingface"
 AUTH_SECRET   = "quran-asr-auth"          # modal.Secret mit key AUTH_TOKEN
+
+# CPU-Reservierung. Ohne cpu= gibt Modal 0.125 Kerne - der OpenVINO-Forward lief
+# damit auf einem Achtel Kern, waehrend er mit 8 Threads rechnete. Bewusst ein
+# Tupel und kein fester Wert: 1 Kern ist garantiert und wird bezahlt, bis zu 8
+# Kerne werden genutzt wenn die Maschine sie frei hat. Ein festes cpu=4.0 wuerde
+# bei min_containers=2 rund um die Uhr vier Kerne kosten.
+CPU_REQUEST, CPU_LIMIT = 1.0, 8.0
+MEMORY_MB = 4096
+
+# Threads fuer den OpenVINO-Forward. Muss explizit in die Container-Umgebung,
+# denn das Basis-Image setzt OMP_NUM_THREADS=1: die Kette in load()
+# (OV_THREADS -> OMP_NUM_THREADS -> 4) waere sonst schon beim ersten gesetzten
+# Wert fertig und der Forward liefe einthreadig, obwohl bis zu CPU_LIMIT Kerne
+# bereitstehen. OpenVINO rechnet mit TBB, nicht mit OpenMP - der Wert, der
+# zaehlt, ist INFERENCE_NUM_THREADS.
+OV_THREADS = 4
 
 
 def _preload_models() -> None:
@@ -58,9 +84,47 @@ image = (
     )
     .env({"HF_HOME": HF_CACHE, "TRANSFORMERS_CACHE": HF_CACHE})
     .run_function(_preload_models)        # Modelle in Image-Layer einbrennen
+    # Bewusst NACH run_function: eine Aenderung hier laesst den Modell-Layer
+    # unberuehrt, der Export laeuft nicht erneut.
+    .env({"OV_THREADS": str(OV_THREADS)})
 )
 
 app       = modal.App(APP_NAME)
+
+# Die Mess-Instanz bekommt zusaetzlich ASR_BENCH=1 in die Container-Umgebung.
+# Die Produktion kennt die Bench-Endpunkte deshalb gar nicht.
+_SECRETS = [modal.Secret.from_name(AUTH_SECRET)]
+if BENCH_DEPLOY:
+    _SECRETS.append(modal.Secret.from_dict({"ASR_BENCH": "1"}))
+
+
+def read_wav_pcm16(raw: bytes, sample_rate: int):
+    """Liest 16-bit-PCM-WAV direkt - kein Codec, kein Resampling, kein torch.
+
+    Genau das Format, das die App aufnimmt (16 kHz, mono, 16 bit). Trifft es
+    nicht zu (falsche Rate, anderes Format, gar kein WAV), kommt None zurueck
+    und der normale Decoder uebernimmt - alte App-Versionen im Feld senden
+    weiter AAC/m4a und muessen weiter funktionieren.
+    """
+    import io
+    import wave
+
+    import numpy as np
+    try:
+        with wave.open(io.BytesIO(raw), "rb") as wf:
+            if wf.getsampwidth() != 2 or wf.getframerate() != sample_rate:
+                return None
+            channels = wf.getnchannels()
+            frames = wf.readframes(wf.getnframes())
+    except Exception:
+        return None
+    if not frames:
+        return None
+    samples = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+    if channels > 1:
+        usable = (samples.size // channels) * channels
+        samples = samples[:usable].reshape(-1, channels).mean(axis=1)
+    return np.ascontiguousarray(samples, dtype=np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -69,8 +133,10 @@ app       = modal.App(APP_NAME)
 
 @app.cls(
     image=image,
-    secrets=[modal.Secret.from_name(AUTH_SECRET)],
-    min_containers=2,                 # 2 warm -> Redundanz + kein Single-Point-of-Failure.
+    secrets=_SECRETS,
+    cpu=(CPU_REQUEST, CPU_LIMIT),     # reserviert 1 Kern, darf bis 8 nutzen.
+    memory=MEMORY_MB,
+    min_containers=MIN_CONTAINERS,    # 2 warm -> Redundanz + kein Single-Point-of-Failure.
     max_containers=50,                # Autoscale-Cap (Kostenbremse).
     buffer_containers=1,              # 1 vorgeheizt fuer Traffic-Spikes.
     scaledown_window=600,             # 10 min idle -> Container darf runterfahren.
@@ -108,8 +174,12 @@ class ASR:
         self.USE_FP16 = False
         self.DTYPE = torch.float32
 
-        self.N_THREADS = int(os.environ.get("OV_THREADS", max(1, min(8, os.cpu_count() or 1))))
-        self.N_THREADS = max(1, min(self.N_THREADS, os.cpu_count() or 1))
+        # Threads bewusst NICHT aus os.cpu_count(): der Host hat viele Kerne, der
+        # Container bekommt nur die reservierten (cpu=(1,8)). Mehr Threads als
+        # verfuegbare Kerne heisst Kontextwechsel statt Rechenzeit.
+        self.N_THREADS = max(
+            1, int(os.environ.get("OV_THREADS") or os.environ.get("OMP_NUM_THREADS") or 4)
+        )
         ov_config = {
             "PERFORMANCE_HINT": "LATENCY",
             "NUM_STREAMS": "1",
@@ -158,6 +228,10 @@ class ASR:
         self.MIN_SAMPLES = int(0.15 * self.SR)
         self.WS_KEEPALIVE_SEC = 20
         self.WORD_STREAM_DELAY_SEC = 0.035
+        # Stille vor und hinter der Aufnahme, damit CTC am Wortanfang und
+        # Wortende nicht am Rand des Fensters klebt. 250 ms waren 500 ms Audio
+        # ohne Inhalt pro Anfrage; 100 ms reichen fuer denselben Zweck.
+        self.PAD_CONTEXT_MS = 100
 
         # In-Memory Log-Ring (fuer /logs).
         self._LOG_BUF = deque(maxlen=200)
@@ -175,13 +249,20 @@ class ASR:
 
     # ================== Audio-Preprocessing (1:1 aus Notebook) ================
     def _decode_audio(self, raw: bytes):
-        """Native decode via torchaudio (libtorio) - kein ffmpeg-Subprocess.
+        """Drei Wege, vom schnellsten zum langsamsten.
 
-        Fallback auf pydub (startet ffmpeg-Prozess) fuer Formate die libtorio
-        nicht kennt. Auf typischen Handy-Uploads (m4a/aac/wav) ~10x schneller
-        als pydub, weil kein Subprocess-Boot noetig ist.
+        1. 16-bit-PCM-WAV in 16 kHz -> direkt lesen (stdlib wave + numpy).
+           Das schickt die App seit der Umstellung auf PCM-Aufnahme.
+        2. torchaudio (libtorio) - nativer Decoder ohne Subprocess, deckt
+           m4a/aac/wav ab, die alte App-Versionen senden.
+        3. pydub -> startet einen ffmpeg-Prozess. Das kostet pro Anfrage
+           mehrere hundert Millisekunden und wird deshalb geloggt
+           ("decode_fallback"), damit sichtbar ist wie oft es passiert.
         """
         import io
+        fast = read_wav_pcm16(raw, self.SR)
+        if fast is not None:
+            return fast
         try:
             import torchaudio
             wav_t, sr = torchaudio.load(io.BytesIO(raw))     # (channels, samples) float32
@@ -190,7 +271,8 @@ class ASR:
             if sr != self.SR:
                 wav_t = self.AF.resample(wav_t, sr, self.SR)
             return wav_t.squeeze(0).contiguous().numpy().astype(self.np.float32)
-        except Exception:
+        except Exception as e:
+            self._log("decode_fallback", err=type(e).__name__, detail=str(e)[:120])
             seg = self.AudioSegment.from_file(io.BytesIO(raw))
             seg = seg.set_frame_rate(self.SR).set_channels(1).set_sample_width(2)
             return self.np.asarray(seg.get_array_of_samples(), dtype=self.np.float32) / 32768.0
@@ -222,17 +304,20 @@ class ASR:
         end = min(len(audio), segs[-1]["end"] + pad)
         return audio[start:end]
 
-    def _pad_context(self, audio, ms: int = 250):
+    def _pad_context(self, audio, ms: int | None = None):
+        ms = self.PAD_CONTEXT_MS if ms is None else int(ms)
+        if ms <= 0:
+            return audio
         pad = self.np.zeros(int(ms * self.SR / 1000), dtype=self.np.float32)
         return self.np.concatenate([pad, audio, pad])
 
-    def _preprocess(self, raw: bytes, trim: bool = True):
+    def _preprocess(self, raw: bytes, trim: bool = True, pad_ms: int | None = None):
         audio = self._decode_audio(raw)
         audio = self._highpass(audio)
         audio = self._normalize_level(audio)
         if trim:
             audio = self._gentle_trim(audio)
-        audio = self._pad_context(audio)
+        audio = self._pad_context(audio, pad_ms)
         return audio
 
     # =================== Scoring-Kern (1:1 aus Notebook) ======================
@@ -463,7 +548,7 @@ class ASR:
             })
         return results
 
-    def _score_word(self, raw: bytes, target: str):
+    def _score_word(self, raw: bytes, target: str, pad_ms: int | None = None):
         from fastapi import HTTPException
         if len(raw) > self.MAX_AUDIO_BYTES:
             raise HTTPException(413, f"Audio > {self.MAX_AUDIO_BYTES // 1024} KB.")
@@ -472,7 +557,7 @@ class ASR:
         t_pre = self.time.perf_counter()
         try:
             # Client-Recorder endpointed schon via metering -> kein Silero-VAD noetig.
-            wav = self._preprocess(raw, trim=False)
+            wav = self._preprocess(raw, trim=False, pad_ms=pad_ms)
         except Exception as e:
             raise HTTPException(400, f"Audio ungültig: {e}")
         if wav.size < self.MIN_SAMPLES:
@@ -681,6 +766,9 @@ class ASR:
         })
 
         AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "").strip()
+        # Nur die Mess-Instanz setzt ASR_BENCH=1 (ueber ein eigenes Secret beim
+        # Deploy). In der Produktion ist BENCH False und /bench/* existiert nicht.
+        BENCH = os.environ.get("ASR_BENCH", "") == "1"
 
         def require_bearer(authorization: str = Header(default="")) -> None:
             if not AUTH_TOKEN:                              # Secret leer -> Auth aus.
@@ -722,6 +810,10 @@ class ASR:
                 "vad": "Silero VAD 5",
                 "fp16": self.USE_FP16,
                 "openvino_threads": self.N_THREADS,
+                # Damit eine Messung belegen kann, gegen welchen Stand sie lief.
+                "cpu_visible": os.cpu_count(),
+                "pad_context_ms": self.PAD_CONTEXT_MS,
+                "bench": BENCH,
                 "endpoints": ["/assess (HTTP)", "/stream (WebSocket)", "/logs"],
             }
 
@@ -744,6 +836,40 @@ class ASR:
                 raise HTTPException(400, str(e))
             result["duration_ms"] = int((self.time.perf_counter() - t0) * 1000)
             return result
+
+        if BENCH:
+            # Messendpunkt, nur auf der Bench-Instanz. Bewertet dieselbe Aufnahme
+            # mit mehreren Padding-Laengen, damit belegbar ist, dass die Kuerzung
+            # von 250 ms auf 100 ms die Punktzahl nicht verschiebt.
+            @api.post("/bench/pad", dependencies=[Depends(require_bearer)])
+            def bench_pad(
+                audio: UploadFile = File(...),
+                target: str = Form(...),
+                pads: str = Form("250,100"),
+            ):
+                target = target.strip()
+                if not target:
+                    raise HTTPException(400, "Zielwort fehlt.")
+                raw = audio.file.read(self.MAX_AUDIO_BYTES + 1)
+                runs = []
+                for value in [p.strip() for p in pads.split(",") if p.strip()]:
+                    pad_ms = int(value)
+                    t0 = self.time.perf_counter()
+                    try:
+                        result = self._score_word(raw, target, pad_ms=pad_ms)
+                    except ValueError as e:
+                        raise HTTPException(400, str(e))
+                    runs.append({
+                        "pad_ms": pad_ms,
+                        "total": result["total"],
+                        "transcription": result["transcription"],
+                        "duration_ms": int((self.time.perf_counter() - t0) * 1000),
+                        "timings": result["timings"],
+                        "units": [
+                            {"label": u["label"], "score": u["score"]} for u in result["units"]
+                        ],
+                    })
+                return {"target": target, "bytes": len(raw), "runs": runs}
 
         @api.websocket("/stream")
         async def stream_ws(ws: WebSocket):

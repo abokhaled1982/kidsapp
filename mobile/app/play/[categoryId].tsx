@@ -370,6 +370,12 @@ export default function PlayScreen() {
                           extra={`${Math.round((meta.client.bytes ?? 0) / 1024)} KB`}
                           colors={c}
                         />
+                        <DiagLine
+                          label="Format für den Server"
+                          value={meta.client.wav16 ? "wav16 (Schnellpfad)" : "raw (Server dekodiert)"}
+                          extra={`Aufbereitung ${meta.client.prepare_ms} ms`}
+                          colors={c}
+                        />
                         <DiagLine label="WS send-Aufruf" value={`${meta.client.ws_send_ms} ms`} colors={c} />
                         <DiagLine label="WS warm?" value={meta.client.warm ? "ja" : "nein (Connect)"} colors={c} />
                         <DiagLine label="→ Roundtrip (rtt)" value={`${meta.client.rtt_ms} ms`} bold colors={c} />

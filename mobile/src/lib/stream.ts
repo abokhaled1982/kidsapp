@@ -11,10 +11,14 @@
 //   - Server-Keep-Alive alle 20s ("ping":true) wird stumm ignoriert.
 //   - warmUp() als fire-and-forget beim Screen-Mount, damit das erste Wort
 //     nicht die Connect-Latenz bezahlt.
+//   - Die Aufnahme geht durch readUriForUpload(): PCM-WAV wird auf dem Geraet
+//     auf Zielpegel gebracht und als 16-bit-mono-WAV gesendet, damit der Server
+//     keinen Codec starten und nicht umrechnen muss. Anderes Material (m4a von
+//     Android) geht unveraendert durch.
 //   - HTTP-Fallback existiert nicht mehr: Fehler werden hoch propagiert und
 //     als Fehlerzustand in der UI angezeigt.
 
-import { readUriAsArrayBuffer } from "@/lib/audioBytes";
+import { readUriForUpload } from "@/lib/audioBytes";
 import { useDebug } from "@/store/useDebug";
 import type { AssessResponse } from "@/lib/api";
 
@@ -66,7 +70,9 @@ export type AyahProgress = AyahStartEvent | AyahWordEvent | AyahDoneEvent;
 
 /** Client-seitige Latenz-Aufschluesselung fuer Diagnose (Anzeige + Log). */
 export type AyahClientTimings = {
-  bytes_read_ms: number;     // URI -> ArrayBuffer
+  bytes_read_ms: number;     // URI -> ArrayBuffer inkl. Aufbereitung
+  prepare_ms: number;        // davon: Pegel angleichen + WAV schreiben
+  wav16: boolean;            // 16-kHz-PCM -> Server-Schnellpfad ohne Codec
   ws_send_ms: number;        // ws.send(text+bytes)
   first_frame_ms: number;    // vom Send bis "start"-Frame (~ RTT + Backend-Compute)
   last_frame_ms: number;     // vom Send bis "done"-Frame
@@ -77,8 +83,10 @@ export type AyahClientTimings = {
 export type WordClientTimings = {
   connect_ms: number;
   bytes_read_ms: number;
-  ws_send_ms: number;
+  prepare_ms: number;
+  wav16: boolean;
   rtt_ms: number;
+  ws_send_ms: number;
   bytes: number;
   warm: boolean;
 };
@@ -174,7 +182,8 @@ class StreamSession {
       const connect_ms = Date.now() - tConn0;
 
       const tRead0 = Date.now();
-      const bytes = await readUriAsArrayBuffer(uri);
+      const audio = await readUriForUpload(uri);
+      const bytes = audio.bytes;
       const bytes_read_ms = Date.now() - tRead0;
 
       return await new Promise<{ response: AssessResponse; client: WordClientTimings }>((resolve, reject) => {
@@ -205,7 +214,9 @@ class StreamSession {
               `warm=${wasWarm ? "y" : "n"}`,
               `connect=${connect_ms}ms`,
               `bytes=${bytes.byteLength}`,
+              `fmt=${audio.wav16 ? "wav16" : "raw"}`,
               `read=${bytes_read_ms}ms`,
+              `prep=${audio.prepare_ms}ms`,
               `send=${ws_send_ms}ms`,
               `rtt=${rtt_ms}ms`,
               `server=${serverMs}ms`,
@@ -214,10 +225,13 @@ class StreamSession {
             );
             useDebug.getState().push("ws_word",
               `RTT ${rtt_ms}ms (Server ${serverMs}ms, Netz ${net_ms}ms)`,
-              { warm: wasWarm ? 1 : 0, connect_ms, read_ms: bytes_read_ms, send_ms: ws_send_ms, rtt_ms, server_ms: serverMs });
+              { warm: wasWarm ? 1 : 0, connect_ms, read_ms: bytes_read_ms, prep_ms: audio.prepare_ms,
+                wav16: audio.wav16 ? 1 : 0, send_ms: ws_send_ms, rtt_ms, server_ms: serverMs });
             const client: WordClientTimings = {
               connect_ms,
               bytes_read_ms,
+              prepare_ms: audio.prepare_ms,
+              wav16: audio.wav16,
               ws_send_ms,
               rtt_ms,
               bytes: bytes.byteLength,
@@ -280,7 +294,8 @@ class StreamSession {
       const ws = await this.connect();
 
       const tRead0 = Date.now();
-      const bytes = await readUriAsArrayBuffer(uri);
+      const audio = await readUriForUpload(uri);
+      const bytes = audio.bytes;
       const bytes_read_ms = Date.now() - tRead0;
 
       return await new Promise<{ done: AyahDoneEvent; client: AyahClientTimings }>((resolve, reject) => {
@@ -319,6 +334,8 @@ class StreamSession {
               cleanup();
               const client: AyahClientTimings = {
                 bytes_read_ms,
+                prepare_ms: audio.prepare_ms,
+                wav16: audio.wav16,
                 ws_send_ms,
                 first_frame_ms,
                 last_frame_ms,
@@ -330,7 +347,9 @@ class StreamSession {
               console.log(
                 "[AYAH]",
                 `bytes=${client.bytes}`,
+                `fmt=${audio.wav16 ? "wav16" : "raw"}`,
                 `read=${bytes_read_ms}ms`,
+                `prep=${audio.prepare_ms}ms`,
                 `send=${ws_send_ms}ms`,
                 `first=${first_frame_ms}ms`,
                 `last=${last_frame_ms}ms`,
@@ -342,6 +361,8 @@ class StreamSession {
                 {
                   bytes: client.bytes,
                   read_ms: bytes_read_ms,
+                  prep_ms: audio.prepare_ms,
+                  wav16: audio.wav16 ? 1 : 0,
                   first_ms: first_frame_ms,
                   last_ms: last_frame_ms,
                   server_ms: done.duration_ms,
