@@ -16,6 +16,8 @@ export default function RootLayout() {
         }}
       >
         <Stack.Screen name="(tabs)" />
+        <Stack.Screen name="letters" />
+        <Stack.Screen name="level" />
         <Stack.Screen name="play/[categoryId]" />
         <Stack.Screen name="settings" options={{ presentation: "modal" }} />
       </Stack>

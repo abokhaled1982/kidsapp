@@ -2,6 +2,9 @@ export type Word = {
   ar: string;
   de: string;
   translit?: string;
+  // Bild zum Wort (Emoji-Bildebene, siehe pictures.ts). Fehlt es, zeigt die
+  // Oberflaeche das Bild der Kategorie oder der Lernstufe.
+  pic?: string;
 };
 
 export type CategoryId =

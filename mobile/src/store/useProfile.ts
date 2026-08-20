@@ -3,7 +3,10 @@ import { createJSONStorage, persist } from "zustand/middleware";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { type ChildProfile } from "./profileModel";
 
-export { PROFILE_THEMES, LEVEL_SUMMARIES } from "./profileModel";
+export { PROFILE_THEMES } from "./profileModel";
+// Die Levelbeschreibungen kommen aus den Levelplaenen, damit Titel, Kurzzeile
+// und Inhalte nicht auseinanderlaufen.
+export { LEVEL_PLANS, LEVEL_SUMMARIES } from "@/data/levels";
 export type { ChildProfile, LearningGoal, LearningLevel, ProfileMode, ProfileStyle, ProfileTheme } from "./profileModel";
 
 type ProfileState = {

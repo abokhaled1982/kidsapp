@@ -8,7 +8,12 @@ type ProgressState = {
   streakDays: number;
   lastPlayedISO: string | null;
   wordsMastered: Record<string, number>;
+  // Wie oft ein Hoerinhalt (Buchstabe, Haraka, Silbe, Tajweed-Regel) angehoert
+  // wurde. Level 5 und 6 haben keine Aussprachebewertung, ihr Fortschritt
+  // haengt an diesen Zaehlern.
+  heard: Record<string, number>;
   addResult: (wordKey: string, total: number) => void;
+  markHeard: (key: string) => void;
   reset: () => void;
 };
 
@@ -22,6 +27,7 @@ export const useProgress = create<ProgressState>()(
       streakDays: 0,
       lastPlayedISO: null,
       wordsMastered: {},
+      heard: {},
 
       addResult: (wordKey, total) => {
         const gainedStars = total >= 90 ? 3 : total >= 75 ? 2 : total >= 50 ? 1 : 0;
@@ -45,7 +51,13 @@ export const useProgress = create<ProgressState>()(
         }));
       },
 
-      reset: () => set({ xp: 0, stars: 0, streakDays: 0, lastPlayedISO: null, wordsMastered: {} }),
+      markHeard: (key) =>
+        set((s) => ({
+          heard: { ...s.heard, [key]: (s.heard[key] ?? 0) + 1 },
+        })),
+
+      reset: () =>
+        set({ xp: 0, stars: 0, streakDays: 0, lastPlayedISO: null, wordsMastered: {}, heard: {} }),
     }),
     {
       name: "kidsapp.progress.v1",

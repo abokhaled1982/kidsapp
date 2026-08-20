@@ -5,9 +5,12 @@ import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 
 import { SURAHS } from "@/data/juzamma";
+import { quranWordKey } from "@/data/progressKeys";
 import { useProgress } from "@/store/useProgress";
 import { useBackend } from "@/store/useBackend";
+import { useProfile } from "@/store/useProfile";
 import { useTheme } from "@/store/useTheme";
+import { MASTERY_SCORE, levelPlan, surahWordCount, surahsForLevel } from "@/store/levelFlow";
 
 const AR_DIGITS = ["٠", "١", "٢", "٣", "٤", "٥", "٦", "٧", "٨", "٩"];
 const toArabicNumber = (n: number) =>
@@ -18,6 +21,14 @@ export default function QuranScreen() {
   const c = useTheme();
   const backendUrl = useBackend((s) => s.url);
   const wordsMastered = useProgress((s) => s.wordsMastered);
+  const profileLevel = useProfile((s) => s.profile?.level ?? 5);
+  const plan = levelPlan(profileLevel);
+
+  // Reihenfolge nach Lernstufe: Level 7 sieht nur die kurzen Suren, Level 8
+  // arbeitet von der kuerzesten zur laengsten, Level 9 den ganzen Juz.
+  const recommended = useMemo(() => surahsForLevel(profileLevel), [profileLevel]);
+  const list = recommended.length > 0 ? recommended : SURAHS;
+  const recommendedIds = useMemo(() => new Set(recommended.map((s) => s.n)), [recommended]);
 
   // Fortschritt pro Sura: Anteil der Woerter mit Score >= 75.
   const progressBySurah = useMemo(() => {
@@ -28,8 +39,7 @@ export default function QuranScreen() {
       for (const a of s.ayat) {
         for (const w of a.words) {
           total++;
-          const key = `quran:${s.n}:${a.n}:${w.ar}`;
-          if ((wordsMastered[key] ?? 0) >= 75) done++;
+          if ((wordsMastered[quranWordKey(s.n, a.n, w.ar)] ?? 0) >= MASTERY_SCORE) done++;
         }
       }
       out[s.n] = { done, total };
@@ -55,19 +65,29 @@ export default function QuranScreen() {
       <View style={styles.header}>
         <Text style={[styles.headline, { color: c.text }]}>جُزْء عَمّ</Text>
         <Text style={[styles.subheadline, { color: c.textMuted }]}>Juzʾ ʿAmma — {SURAHS.length} Suren</Text>
+        <Text style={[styles.subheadline, { color: c.textMuted }]}>
+          {recommended.length > 0
+            ? `${plan.level}. Lernlevel · ${list.length} Suren, leichteste zuerst`
+            : `${plan.level}. Lernlevel · erst Buchstaben und Silben, Suren kommen danach`}
+        </Text>
       </View>
 
       <ScrollView contentContainerStyle={styles.list} showsVerticalScrollIndicator={false}>
-        {SURAHS.map((s) => {
+        {list.map((s) => {
           const p = progressBySurah[s.n];
           const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
+          const isRecommended = recommendedIds.has(s.n);
           return (
             <Pressable
               key={s.n}
               onPress={() => router.push(`/quran/${s.n}` as any)}
               style={({ pressed }) => [
                 styles.card,
-                { backgroundColor: c.surface, borderColor: c.border, shadowColor: c.text },
+                {
+                  backgroundColor: c.surface,
+                  borderColor: isRecommended ? c.primary : c.border,
+                  shadowColor: c.text,
+                },
                 pressed && styles.pressed,
               ]}
             >
@@ -79,7 +99,7 @@ export default function QuranScreen() {
                   سُورَة {s.name_ar}
                 </Text>
                 <Text style={[styles.surahMeta, { color: c.textMuted }]}>
-                  {s.translit} · {s.name_de} · {s.ayat.length - 1} Verse
+                  {s.translit} · {s.name_de} · {s.ayat.length - 1} Verse · {surahWordCount(s)} Wörter
                 </Text>
                 <View style={styles.progressWrap}>
                   <View style={[styles.progressBg, { backgroundColor: c.surfaceMuted }]}>

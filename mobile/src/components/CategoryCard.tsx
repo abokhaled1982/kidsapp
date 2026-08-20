@@ -28,7 +28,9 @@ export function CategoryCard({ category, progressPct, onPress }: Props) {
         {category.arabic}
       </Text>
       <View style={styles.progressBg}>
-        <View style={[styles.progressFill, { width: `${Math.round(progressPct * 100)}%` }]} />
+        <View
+          style={[styles.progressFill, { backgroundColor: fg, width: `${Math.round(progressPct * 100)}%` }]}
+        />
       </View>
     </Pressable>
   );
@@ -52,6 +54,5 @@ const styles = StyleSheet.create({
   },
   progressFill: {
     height: "100%",
-    backgroundColor: "#ffffff",
   },
 });

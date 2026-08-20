@@ -141,11 +141,3 @@ export const PROFILE_THEMES: Record<ProfileTheme, ThemePalette> = {
     },
   },
 };
-
-export const LEVEL_SUMMARIES: Record<LearningLevel, string> = {
-  5: "Buchstaben und Laute entdecken",
-  6: "Harakat, Silben und erste Wörter",
-  7: "Wortschatz und kurze Suren",
-  8: "Ayat und Tajweed-Grundlagen",
-  9: "Juz-Lernen und selbstständige Rezitation",
-};

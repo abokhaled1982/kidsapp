@@ -7,7 +7,8 @@ import { useBackend } from "@/store/useBackend";
 import { useProfile } from "@/store/useProfile";
 import { useTheme } from "@/store/useTheme";
 import { themeForStyle } from "@/store/profileFlow";
-import { PROFILE_THEMES, type ProfileStyle } from "@/store/profileModel";
+import { PROFILE_THEMES, type LearningLevel, type ProfileStyle } from "@/store/profileModel";
+import { levelsInOrder } from "@/store/levelFlow";
 import { pingHealth } from "@/lib/api";
 import { closeStreamSession, StreamSession } from "@/lib/stream";
 
@@ -62,6 +63,12 @@ export default function SettingsScreen() {
   // Stil UND Theme zusammen schreiben, sonst laufen die beiden Felder auseinander.
   const pickStyle = (style: ProfileStyle) => {
     updateProfile({ style, theme: themeForStyle(style) });
+  };
+
+  // Lernstufe wechseln gehoert in den Elternbereich (Anforderungen 13). Der
+  // Fortschritt bleibt erhalten - die Levelinhalte lesen dieselben Keys.
+  const pickLevel = (level: LearningLevel) => {
+    updateProfile({ level });
   };
 
   const resetProfile = () => {
@@ -183,6 +190,50 @@ export default function SettingsScreen() {
               </View>
             ) : null}
 
+            {profile ? (
+              <View style={[styles.colorCard, { backgroundColor: c.surface, borderColor: c.border }]}>
+                <Text style={[styles.toggleTitle, { color: c.text }]}>🧩 Lernstufe</Text>
+                <Text style={[styles.toggleHint, { color: c.textMuted }]}>
+                  Bestimmt Lernpfade, Übungen und Abschlusskriterium. Der Fortschritt bleibt erhalten.
+                </Text>
+                <View style={styles.levelList}>
+                  {levelsInOrder().map((plan) => {
+                    const active = profile.level === plan.level;
+                    return (
+                      <Pressable
+                        key={plan.level}
+                        onPress={() => pickLevel(plan.level)}
+                        accessibilityRole="button"
+                        accessibilityState={{ selected: active }}
+                        style={({ pressed }) => [
+                          styles.levelRow,
+                          {
+                            backgroundColor: active ? c.surfaceMuted : c.surface,
+                            borderColor: active ? c.primary : c.border,
+                            borderWidth: active ? 2 : 1,
+                          },
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        <View style={[styles.levelBadge, { backgroundColor: active ? c.primary : c.surfaceMuted }]}>
+                          <Text style={[styles.levelBadgeText, { color: active ? c.onPrimary : c.textMuted }]}>
+                            {plan.level}
+                          </Text>
+                        </View>
+                        <View style={styles.levelBody}>
+                          <Text style={[styles.levelTitle, { color: c.text }]}>
+                            {plan.emoji} {plan.title}
+                          </Text>
+                          <Text style={[styles.levelSummary, { color: c.textMuted }]}>{plan.summary}</Text>
+                        </View>
+                        {active ? <Ionicons name="checkmark-circle" size={20} color={c.primary} /> : null}
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
+            ) : null}
+
             <Pressable
               onPress={runDiagnostic}
               style={[styles.diagBtn, { backgroundColor: c.surfaceMuted, borderColor: c.border }]}
@@ -277,6 +328,20 @@ const styles = StyleSheet.create({
   styleEmoji: { fontSize: 18 },
   styleLabel: { fontSize: 13, fontWeight: "700", flexShrink: 1 },
   styleDot: { width: 10, height: 10, borderRadius: 5 },
+  levelList: { gap: 8, marginTop: 12 },
+  levelRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    borderRadius: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+  },
+  levelBadge: { width: 32, height: 32, borderRadius: 16, alignItems: "center", justifyContent: "center" },
+  levelBadgeText: { fontSize: 15, fontWeight: "800" },
+  levelBody: { flex: 1, gap: 2 },
+  levelTitle: { fontSize: 14, fontWeight: "700" },
+  levelSummary: { fontSize: 11, lineHeight: 15 },
   diagBtn: {
     marginTop: 16,
     borderWidth: 1,

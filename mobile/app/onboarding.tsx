@@ -13,7 +13,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
-import { PROFILE_THEMES, type LearningGoal, type LearningLevel, type ProfileMode, type ProfileStyle, useProfile } from "@/store/useProfile";
+import { LEVEL_PLANS, PROFILE_THEMES, type LearningGoal, type LearningLevel, type ProfileMode, type ProfileStyle, useProfile } from "@/store/useProfile";
 import { buildProfile, themeForStyle } from "@/store/profileFlow";
 
 // Reihenfolge der Fragen. Der Stil kommt bewusst vor allen farbigen Flaechen,
@@ -243,18 +243,37 @@ export default function OnboardingScreen({ onComplete }: { onComplete?: () => vo
             )}
             {step === STEP_LEVEL && (
               <Question title="Wähle dein Level" colors={colors}>
-                <View style={styles.levelGrid}>
-                  {LEVELS.map((item) => (
-                    <ChoiceCard
-                      key={item}
-                      emoji={String(item)}
-                      label={item === 5 ? "Start" : item === 9 ? "Profi" : "Weiter"}
-                      selected={level === item}
-                      color={colors.primary}
-                      colors={colors}
-                      onPress={() => select(() => setLevel(item))}
-                    />
-                  ))}
+                <View style={styles.levelList}>
+                  {LEVELS.map((item) => {
+                    const plan = LEVEL_PLANS[item];
+                    const selected = level === item;
+                    return (
+                      <Pressable
+                        key={item}
+                        onPress={() => select(() => setLevel(item))}
+                        style={[
+                          styles.levelCard,
+                          {
+                            backgroundColor: selected ? colors.surfaceMuted : colors.surface,
+                            borderColor: selected ? colors.primary : colors.border,
+                          },
+                        ]}
+                      >
+                        <View style={[styles.levelBadge, { backgroundColor: colors.primary }]}>
+                          <Text style={[styles.levelBadgeText, { color: colors.onPrimary }]}>{item}</Text>
+                        </View>
+                        <View style={styles.levelBody}>
+                          <Text style={[styles.levelTitle, { color: colors.text }]}>
+                            {plan.emoji} {plan.title}
+                          </Text>
+                          <Text style={[styles.levelSummary, { color: colors.textMuted }]}>{plan.summary}</Text>
+                        </View>
+                        {selected ? (
+                          <Ionicons name="checkmark-circle" size={22} color={colors.primary} />
+                        ) : null}
+                      </Pressable>
+                    );
+                  })}
                 </View>
               </Question>
             )}
@@ -355,7 +374,21 @@ const styles = StyleSheet.create({
   choiceLabel: { fontSize: 14, fontWeight: "800", marginTop: 5 },
   swatch: { borderRadius: 5, bottom: 8, height: 10, position: "absolute", width: 26 },
   check: { position: "absolute", right: 8, top: 8 },
-  levelGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10, justifyContent: "center" },
+  levelList: { gap: 8 },
+  levelCard: {
+    alignItems: "center",
+    borderRadius: 16,
+    borderWidth: 2,
+    flexDirection: "row",
+    gap: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+  },
+  levelBadge: { alignItems: "center", borderRadius: 18, height: 36, justifyContent: "center", width: 36 },
+  levelBadgeText: { fontSize: 17, fontWeight: "800" },
+  levelBody: { flex: 1, gap: 2 },
+  levelTitle: { fontSize: 15, fontWeight: "700" },
+  levelSummary: { fontSize: 12, lineHeight: 17 },
   nameInput: { borderRadius: 18, borderWidth: 1, fontSize: 22, paddingHorizontal: 18, paddingVertical: 16, textAlign: "center" },
   nextButton: { alignItems: "center", borderRadius: 18, flexDirection: "row", gap: 8, justifyContent: "center", paddingVertical: 15 },
   nextText: { fontSize: 16, fontWeight: "800" },
