@@ -19,7 +19,7 @@ const toArabicNumber = (n: number) =>
 export default function QuranScreen() {
   const router = useRouter();
   const c = useTheme();
-  const backendUrl = useBackend((s) => s.url);
+  const tokenEndpoint = useBackend((s) => s.tokenEndpoint);
   const wordsMastered = useProgress((s) => s.wordsMastered);
   const profileLevel = useProfile((s) => s.profile?.level ?? 5);
   const plan = levelPlan(profileLevel);
@@ -47,7 +47,7 @@ export default function QuranScreen() {
     return out;
   }, [wordsMastered]);
 
-  if (!backendUrl) {
+  if (!tokenEndpoint) {
     return (
       <SafeAreaView style={[styles.root, styles.center, { backgroundColor: c.background }]}>
         <Text style={styles.emoji}>🕌</Text>

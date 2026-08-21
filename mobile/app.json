@@ -34,6 +34,15 @@
     "plugins": [
       "expo-router",
       [
+        "@livekit/react-native-expo-plugin",
+        {
+          "android": {
+            "audioType": "media"
+          }
+        }
+      ],
+      "@config-plugins/react-native-webrtc",
+      [
         "expo-audio",
         {
           "microphonePermission": "Zum Aufnehmen deiner arabischen Aussprache."

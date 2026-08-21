@@ -239,6 +239,157 @@ class ScoringEngine:
                         "score_ms": dt_score},
         }
 
+    def score_ayah(self, pcm, ayah_text: str):
+        """Bewerte eine ganze Ayah als Generator: yieldet start / word / done.
+
+        Identische Forced-Alignment-Logik wie _score_ayah_streamed in asr_app.py,
+        nur ohne Audio-Decode (LiveKit liefert PCM) und ohne FastAPI-Exceptions.
+        Ein Forward ueber die ganze Ayah, danach ein Alignment ueber alle
+        Buchstaben aller Woerter - die Wort-Frames gehen raus, sobald ihr Score
+        fertig ist, damit die App progressiv einfaerben kann.
+        """
+        import time
+        np = self.np
+
+        raw_words = [w for w in ayah_text.split() if w.strip()]
+        if not raw_words:
+            raise ValueError("Ayah-Text leer.")
+        words_clean = [self._strip_diacritics(w) for w in raw_words]
+        # Original-Woerter parallel behalten fuer Tashkeel-/Tajweed-Analyse.
+        raw_words_kept = [orig for orig, clean in zip(raw_words, words_clean) if clean]
+        words_clean = [w for w in words_clean if w]
+        if not words_clean:
+            raise ValueError("Ayah-Text enthaelt keine bewertbaren Zeichen.")
+
+        # Tashkeel-Analyse pro Wort (Reihenfolge synchron zu words_clean).
+        phon_meta_per_word = [self._analyze_target(w) for w in raw_words_kept]
+
+        all_chars, word_spans = [], []
+        for w in words_clean:
+            s = len(all_chars)
+            all_chars.extend(list(w))
+            word_spans.append((s, len(all_chars)))
+
+        target_ids = []
+        for ch in all_chars:
+            tid = self.ASR_VOCAB.get(ch)
+            if tid is None:
+                raise ValueError(f"Zeichen {ch!r} nicht im ASR-Vokabular.")
+            target_ids.append(tid)
+
+        if pcm.size < self.MIN_SAMPLES:
+            raise ValueError("Aufnahme zu kurz.")
+
+        t_pre = time.perf_counter()
+        wav = self.preprocess(pcm)
+        dt_pre = int((time.perf_counter() - t_pre) * 1000)
+
+        t_asr = time.perf_counter()
+        log_probs, transcription = self.run_asr(wav)
+        dt_asr = int((time.perf_counter() - t_asr) * 1000)
+
+        if log_probs.shape[1] < len(target_ids):
+            raise ValueError("Aufnahme zu kurz fuer diese Ayah.")
+
+        t_align = time.perf_counter()
+        targets = self.torch.tensor([target_ids], dtype=self.torch.int32)
+        aligned, _ = self.AF.forced_align(log_probs, targets, blank=self.ASR_BLANK_ID)
+        runs = self._runs_of_non_blank(aligned[0].tolist())
+        dt_align = int((time.perf_counter() - t_align) * 1000)
+
+        yield {
+            "kind": "start",
+            "words_count": len(words_clean),
+            "transcription": transcription,
+        }
+
+        t_score = time.perf_counter()
+        # Median-Framedauer aller Buchstaben als Referenz fuer Tashkeel-Checks.
+        run_lens_all = [len(r) for r in runs] if runs else [1]
+        mean_len_ayah = float(np.median(run_lens_all)) if run_lens_all else 1.0
+        per_word_scores = []
+        for wi, (start_c, end_c) in enumerate(word_spans):
+            word = words_clean[wi]
+            word_len = end_c - start_c
+            phon_meta_word = phon_meta_per_word[wi] if wi < len(phon_meta_per_word) else []
+            char_units = []
+            for local_i, char_global_i in enumerate(range(start_c, end_c)):
+                ch = all_chars[char_global_i]
+                if char_global_i >= len(runs):
+                    char_units.append({"label": ch, "score": 0.0, "confidence": 0.0,
+                                       "llr": -5.0, "error_hint": None,
+                                       "articulation": 0.0, "tajweed": 0.0,
+                                       "duration_ms": 0})
+                    continue
+                frames = runs[char_global_i]
+                lp_frame = log_probs[0, frames]
+                equiv_ids = self._equiv_ids(ch, local_i, word_len)
+                target_lp = lp_frame[:, equiv_ids].max(dim=-1).values.mean().item()
+                post_score = float(np.clip((target_lp + 3.0) / 3.0 * 100, 0, 100))
+                conf = float(np.exp(target_lp))
+
+                confuse_ids = self._confuse_ids(ch)
+                if confuse_ids:
+                    per_frame_conf = lp_frame[:, confuse_ids]
+                    best_conf_lp = per_frame_conf.max(dim=-1).values.mean().item()
+                    llr = target_lp - best_conf_lp
+                    llr_score = self._sigmoid(self._LLR_K * llr) * 100.0
+                    if llr < 0:
+                        best_col = int(per_frame_conf.mean(dim=0).argmax().item())
+                        error_hint = self._ID_TO_CHAR.get(confuse_ids[best_col])
+                    else:
+                        error_hint = None
+                else:
+                    llr, llr_score, error_hint = 5.0, 100.0, None
+
+                articulation = 0.4 * post_score + 0.6 * llr_score
+                meta_i = phon_meta_word[local_i] if local_i < len(phon_meta_word) else {}
+                tajweed_score, tajweed_hint = self._tajweed_for_letter(
+                    len(frames), mean_len_ayah, meta_i)
+                hint_final = error_hint if error_hint else tajweed_hint
+                final = 0.75 * articulation + 0.25 * tajweed_score
+                char_units.append({
+                    "label": ch,
+                    "score": float(np.clip(final, 0, 100)),
+                    "confidence": conf,
+                    "llr": float(llr),
+                    "error_hint": hint_final,
+                    "articulation": float(np.clip(articulation, 0, 100)),
+                    "tajweed": float(np.clip(tajweed_score, 0, 100)),
+                    "duration_ms": int(len(frames) * 20),
+                })
+
+            char_scores = [u["score"] for u in char_units]
+            mean_s = float(np.mean(char_scores)) if char_scores else 0.0
+            min_s = float(np.min(char_scores)) if char_scores else 0.0
+            word_score = float(np.clip(0.75 * mean_s + 0.25 * min_s, 0, 100))
+            per_word_scores.append(word_score)
+
+            yield {
+                "kind": "word",
+                "word_idx": wi,
+                "target": word,
+                "score": word_score,
+                "units": char_units,
+            }
+
+        total = float(np.mean(per_word_scores)) if per_word_scores else 0.0
+        dt_score = int((time.perf_counter() - t_score) * 1000)
+        yield {
+            "kind": "done",
+            "total": total,
+            "words_count": len(words_clean),
+            "duration_ms": dt_pre + dt_asr + dt_align + dt_score,
+            "timings": {
+                "audio_samples": int(wav.size),
+                "audio_ms": int(wav.size * 1000 / self.SR),
+                "preprocess_ms": dt_pre,
+                "asr_ms": dt_asr,
+                "align_ms": dt_align,
+                "score_ms": dt_score,
+            },
+        }
+
     def _gop_score(self, log_probs, target_word, phon_meta=None):
         np = self.np
         target_ids = self._encode_target(target_word)

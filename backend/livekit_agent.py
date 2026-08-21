@@ -255,7 +255,7 @@ def run_agent():
 
     import numpy as np
     from livekit import rtc, agents
-    from livekit.agents import AutoSubscribe, JobContext, WorkerOptions
+    from livekit.agents import AutoSubscribe, JobContext, JobExecutorType, WorkerOptions
 
     # ScoringEngine aus dem ins Image kopierten Modul laden
     sys.path.insert(0, "/root")
@@ -267,33 +267,111 @@ def run_agent():
     engine = ScoringEngine(MODEL_DIR, N_THREADS)
     logger.info("ScoringEngine geladen (ONNX INT8).")
 
+    # AudioStream liefert 20ms-Frames -> Frame-Zahl == Millisekunden / 20.
+    FRAME_MS = 20
+    # Stille bis "fertig gesprochen": Ayat brauchen mehr Geduld als Einzelwoerter,
+    # weil Kinder Tajweed-Pausen halten.
+    SILENCE_FRAMES = {"word": 480 // FRAME_MS, "ayah": 700 // FRAME_MS}
+    MAX_FRAMES = {"word": 3500 // FRAME_MS, "ayah": 20000 // FRAME_MS}
+    ENERGY_GATE = 200                              # RMS auf int16-Skala
+
+    async def _stream_frames(make_generator):
+        """Blockierenden Scoring-Generator im Thread laufen lassen und die Frames
+        im Event-Loop ausgeben, sobald sie fertig sind. Ohne das wuerde der
+        ONNX-Forward die Audio-Ingestion des Rooms anhalten."""
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+        sentinel = object()
+
+        def produce():
+            try:
+                for item in make_generator():
+                    loop.call_soon_threadsafe(queue.put_nowait, item)
+            except Exception as exc:  # noqa: BLE001 - an den Caller weiterreichen
+                loop.call_soon_threadsafe(queue.put_nowait, exc)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, sentinel)
+
+        worker = loop.run_in_executor(None, produce)
+        try:
+            while True:
+                item = await queue.get()
+                if item is sentinel:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+        finally:
+            await worker
+
     async def entrypoint(ctx: JobContext):
         logger.info(f"Room: {ctx.room.name}")
         await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
 
         audio_buffer: list[rtc.AudioFrame] = []
         current_target: str | None = None
+        current_mode = "word"
         is_speaking = False
         silence_frames = 0
-        SILENCE_THRESHOLD = 24  # ~480ms Stille = Ende
+        flush_requested = False
+        scoring = False
 
         def frames_to_pcm(frames):
             data = b"".join(f.data for f in frames)
             return np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
 
+        async def publish(payload: dict):
+            await ctx.room.local_participant.publish_data(
+                json.dumps(payload).encode(), reliable=True)
+
         @ctx.room.on("data_received")
         def on_data(data: rtc.DataPacket):
-            nonlocal current_target, audio_buffer, is_speaking, silence_frames
+            nonlocal current_target, current_mode, audio_buffer
+            nonlocal is_speaking, silence_frames, flush_requested
             try:
                 msg = json.loads(data.data.decode())
-                if "target" in msg:
-                    current_target = msg["target"]
-                    audio_buffer = []
-                    is_speaking = False
-                    silence_frames = 0
-                    logger.info(f"Target: {current_target}")
             except Exception as e:
                 logger.warning(f"DataChannel error: {e}")
+                return
+
+            # "Fertig"-Knopf: sofort bewerten, ohne auf die Stille zu warten.
+            if msg.get("cmd") == "flush":
+                flush_requested = True
+                return
+
+            # {"target": "..."} = Wortmodus, {"mode":"ayah","ayah":"..."} = Ayah.
+            mode = msg.get("mode") or ("ayah" if "ayah" in msg else "word")
+            target = msg.get("ayah") if mode == "ayah" else msg.get("target")
+            if not target:
+                return
+
+            current_mode = mode if mode in SILENCE_FRAMES else "word"
+            current_target = target
+            audio_buffer = []
+            is_speaking = False
+            silence_frames = 0
+            flush_requested = False
+            logger.info(f"Target ({current_mode}): {current_target}")
+            # Ack: die App weiss erst dadurch, dass der Agent im Room ist und
+            # zuhoert - vorher darf sie das Mikrofon nicht oeffnen.
+            asyncio.ensure_future(publish({"kind": "ready", "mode": current_mode}))
+
+        async def score_and_publish(pcm, target: str, mode: str):
+            """Scoren und Ergebnis(se) senden. Wortmodus = ein Paket,
+            Ayah-Modus = start/word/done progressiv."""
+            if mode == "ayah":
+                async for frame in _stream_frames(
+                    lambda: engine.score_ayah(pcm, target)
+                ):
+                    await publish(frame)
+                    if frame.get("kind") == "done":
+                        logger.info(f"  -> {frame['total']:.0f}pts "
+                                    f"asr={frame['timings']['asr_ms']}ms")
+                return
+            result = await asyncio.to_thread(engine.score_word, pcm, target)
+            await publish(result)
+            logger.info(f"  -> {result['total']:.0f}pts "
+                        f"asr={result['timings']['asr_ms']}ms")
 
         @ctx.room.on("track_subscribed")
         def on_track(track: rtc.Track, pub: rtc.TrackPublication,
@@ -303,49 +381,84 @@ def run_agent():
             logger.info(f"Audio von {participant.identity}")
 
             async def process():
-                nonlocal audio_buffer, current_target, is_speaking, silence_frames
+                nonlocal audio_buffer, current_target, is_speaking
+                nonlocal silence_frames, flush_requested, scoring
                 stream = rtc.AudioStream(track, sample_rate=16000, num_channels=1)
                 async for ev in stream:
                     if not isinstance(ev, rtc.AudioFrameEvent):
                         continue
-                    if current_target is None:
+                    if current_target is None or scoring:
                         continue
                     frame = ev.frame
                     samples = np.frombuffer(frame.data, dtype=np.int16)
                     energy = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
-                    if energy > 200:
+
+                    if energy > ENERGY_GATE:
                         is_speaking = True
                         silence_frames = 0
                         audio_buffer.append(frame)
                     elif is_speaking:
                         silence_frames += 1
                         audio_buffer.append(frame)
-                        if silence_frames >= SILENCE_THRESHOLD and current_target:
-                            pcm = frames_to_pcm(audio_buffer)
-                            target = current_target
-                            logger.info(f"Score '{target}' {len(pcm)/16000:.2f}s")
-                            try:
-                                result = engine.score_word(pcm, target)
-                                await ctx.room.local_participant.publish_data(
-                                    json.dumps(result).encode(), reliable=True)
-                                logger.info(
-                                    f"  -> {result['total']:.0f}pts "
-                                    f"asr={result['timings']['asr_ms']}ms")
-                            except Exception as e:
-                                await ctx.room.local_participant.publish_data(
-                                    json.dumps({"error": str(e)}).encode(),
-                                    reliable=True)
-                                logger.error(f"  Fehler: {e}")
-                            audio_buffer = []
-                            is_speaking = False
-                            silence_frames = 0
+
+                    # Ende der Aeusserung: genug Stille, Obergrenze erreicht,
+                    # oder die App hat "Fertig" gedrueckt.
+                    enough_silence = (is_speaking
+                                      and silence_frames >= SILENCE_FRAMES[current_mode])
+                    too_long = len(audio_buffer) >= MAX_FRAMES[current_mode]
+                    if not (flush_requested or enough_silence or too_long):
+                        continue
+
+                    frames, target, mode = audio_buffer, current_target, current_mode
+                    forced = flush_requested
+                    # Target verbrauchen: Streu-Audio bis zum naechsten Target
+                    # (z.B. TTS-Ausklang) darf nicht mitbewertet werden.
+                    current_target = None
+                    audio_buffer = []
+                    is_speaking = False
+                    silence_frames = 0
+                    flush_requested = False
+
+                    if not frames:
+                        await publish({"error": "Keine Aufnahme erkannt."})
+                        continue
+
+                    scoring = True
+                    pcm = frames_to_pcm(frames)
+                    reason = "flush" if forced else ("max" if too_long else "silence")
+                    logger.info(
+                        f"Score '{target}' ({mode}) {len(pcm)/16000:.2f}s [{reason}]")
+                    # Der Client kann das VAD-Ende nicht sehen. Ohne dieses Paket
+                    # wuerde die App weiter "hoere zu" zeigen, waehrend hier
+                    # schon gerechnet wird.
+                    await publish({"kind": "scoring", "reason": reason})
+                    try:
+                        await score_and_publish(pcm, target, mode)
+                    except Exception as e:  # noqa: BLE001 - Fehler an die App
+                        await publish({"error": str(e)})
+                        logger.error(f"  Fehler: {e}")
+                    finally:
+                        scoring = False
 
             asyncio.ensure_future(process())
 
         await asyncio.Future()
 
-    worker = agents.Worker(WorkerOptions(entrypoint_fnc=entrypoint))
-    asyncio.get_event_loop().run_until_complete(worker.run())
+    # livekit-agents 1.7 hat `Worker` in `AgentServer` umbenannt; `WorkerOptions`
+    # ist nur noch ein Alias auf `ServerOptions`.
+    #
+    # THREAD statt des Default PROCESS ist hier Pflicht, nicht Geschmack:
+    # `entrypoint` ist eine Closure ueber `engine` und laesst sich nicht in einen
+    # Forkserver-Child picklen. Ausserdem wuerde der Prozess-Executor in prod
+    # 17 Idle-Prozesse vorwaermen — jeder mit eigenem ONNX-Speicher, in einem
+    # Modal-Container mit 4 GB. Im Thread bleibt die eine geladene Engine, und
+    # der Forward-Pass blockiert den Loop ohnehin nicht (siehe _stream_frames).
+    options = WorkerOptions(
+        entrypoint_fnc=entrypoint,
+        job_executor_type=JobExecutorType.THREAD,
+        num_idle_processes=0,
+    )
+    asyncio.run(agents.AgentServer.from_server_options(options).run())
 
 
 # ---------------------------------------------------------------------------
@@ -364,13 +477,21 @@ async def get_token(request: dict):
     """Generiert einen LiveKit JWT fuer die Mobile App.
 
     POST /get_token
-    Body: {"identity": "user_123", "room": "quran-room"}
-    Response: {"token": "eyJ...", "url": "wss://..."}
+    Body: {"identity": "user_123"}
+    Response: {"token": "eyJ...", "url": "wss://...", "room": "quran-user_123"}
+
+    Der Room wird aus der Identity abgeleitet: jedes Kind bekommt einen eigenen
+    Room. Ein gemeinsamer Room wuerde die Mikrofone mischen und die Scores an
+    alle Teilnehmer senden.
     """
+    import re
+
     from livekit.api import AccessToken, VideoGrants
 
-    identity = request.get("identity", "anonymous")
-    room_name = request.get("room", "quran-pronunciation")
+    identity = str(request.get("identity") or "anonymous")
+    # LiveKit-Room-Namen: nur unverfaengliche Zeichen durchlassen.
+    slug = re.sub(r"[^A-Za-z0-9_-]", "", identity)[:48] or "anonymous"
+    room_name = request.get("room") or f"quran-{slug}"
 
     lk_url = os.environ["LIVEKIT_URL"]
     lk_key = os.environ["LIVEKIT_API_KEY"]

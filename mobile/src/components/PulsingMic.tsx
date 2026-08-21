@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { View, Animated, StyleSheet, Easing } from "react-native";
 import { useTheme } from "@/store/useTheme";
 
+/** `level` ist der Mikrofonpegel 0..1 (aus useTrackVolume), nicht dB. */
 type Props = { active: boolean; level: number };
 
 export function PulsingMic({ active, level }: Props) {
@@ -23,7 +24,9 @@ export function PulsingMic({ active, level }: Props) {
     return () => loop.stop();
   }, [active, scale]);
 
-  const loud = (level ?? -60) > -35;
+  // Schwelle empirisch: Zimmerlautstaerke liegt bei useTrackVolume klar unter
+  // 0.1, ein gesprochenes Wort darueber.
+  const loud = (level ?? 0) > 0.1;
 
   return (
     <View style={styles.wrap}>
