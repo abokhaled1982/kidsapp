@@ -31,6 +31,7 @@
 | 11 | [Gestaffelter Umsetzungsplan](#11-gestaffelter-umsetzungsplan) |
 | 12 | [Risiken und Fallstricke](#12-risiken-und-fallstricke) |
 | 13 | [Quellenverzeichnis](#13-quellenverzeichnis) |
+| 14 | [Migrations-Plan: LiveKit + ONNX INT8](#14-migrations-plan-livekit--onnx-int8--gpu-geschwindigkeit-auf-cpu) |
 
 ---
 
@@ -1324,3 +1325,361 @@ Suchpfade nicht auffindbar waren.
 
 *Erstellt am 18. August 2026. Codezeilen-Verweise beziehen sich auf den Stand von
 `backend/asr_app.py` zu diesem Datum.*
+
+---
+
+## 14. Migrations-Plan: LiveKit + ONNX INT8 — GPU-Geschwindigkeit auf CPU
+
+> **Ziel:** ≤ 500 ms End-to-End-Latenz pro Wort, auf CPU, bei ~10.000 Nutzern (PoC),
+> mit ≤ 30 € / Monat Modal-Kosten.
+>
+> **Kernidee:** Nicht die Hardware ändern, sondern die **Overhead-Quellen eliminieren**.
+> ~70 % der heutigen Latenz ist *nicht* Inferenz, sondern Audio-I/O, Decode, Resampling
+> und Netzwerk-Roundtrip. LiveKit eliminiert all das; ONNX INT8 beschleunigt den Rest.
+
+---
+
+### 14.1 Latenz-Aufschlüsselung: Vorher → Nachher
+
+| Schritt | Aktuell (OpenVINO CPU) | Neu (LiveKit + ONNX INT8) | Ersparnis |
+|---------|------------------------|---------------------------|-----------|
+| Aufnahme abwarten (Client) | ~500–1500 ms | **0 ms** (Streaming via WebRTC) | 500–1500 ms |
+| Audio-Transfer (WS-Binary) | ~100–300 ms | **0 ms** (schon am Server via Stream) | 100–300 ms |
+| Audio-Decode (Codec, Resample) | ~50–200 ms | **0 ms** (LiveKit liefert 16 kHz PCM) | 50–200 ms |
+| Normalisierung + HPF + VAD | ~30–80 ms | **~10 ms** (nur HPF, kein Normalize nötig) | 20–70 ms |
+| ASR-Forward (OpenVINO FP32, 4 Threads) | ~400–800 ms | **~80–150 ms** (ONNX INT8, 8 Threads) | 250–650 ms |
+| Alignment + Scoring | ~50 ms | **~30 ms** (unveränderte Logik) | 20 ms |
+| Ergebnis → Client | ~50–100 ms | **~10 ms** (DataChannel, bereits verbunden) | 40–90 ms |
+| **Gesamt** | **~1200–3000 ms** | **~130–200 ms** ✅ | |
+
+
+---
+
+### 14.2 Architektur-Übersicht
+
+```
+┌────────────────────────┐           ┌─────────────────────┐
+│   React Native App     │  WebRTC   │   LiveKit Cloud     │
+│   @livekit/react-native│◄─────────►│   (Free: 1000 min)  │
+│                        │  Opus     │   Global TURN/SFU   │
+│  - Audio Track publish │           │                     │
+│  - Scores empfangen    │           └──────────┬──────────┘
+│    via DataChannel     │                      │
+│  - Zielwort senden     │                      │ PCM-Frames (16 kHz)
+│    via DataChannel     │                      │ + DataChannel
+└────────────────────────┘                      ▼
+                                   ┌──────────────────────────┐
+                                   │  LiveKit Agent (Python)   │
+                                   │  Modal CPU (scale-to-zero)│
+                                   │                           │
+                                   │  1. Audio = 16 kHz PCM    │
+                                   │     (kein Decode nötig!)  │
+                                   │  2. Silero VAD (LiveKit-  │
+                                   │     Plugin, ONNX-basiert) │
+                                   │  3. ONNX Runtime INT8     │
+                                   │     wav2vec2-xlsr-53-ar   │
+                                   │     ~80–150 ms / 8 Kerne  │
+                                   │  4. GOP-Scoring +         │
+                                   │     Alignment + Tajweed   │
+                                   │  5. Ergebnis via          │
+                                   │     DataChannel → Client  │
+                                   └──────────────────────────┘
+```
+
+---
+
+### 14.3 Warum LiveKit die Audio-Verarbeitung überflüssig macht
+
+| Was LiveKit übernimmt | Aktueller Code der das tut | Entfällt |
+|---|---|---|
+| Opus Encode/Decode | `_decode_audio()`, pydub, torchaudio, ffmpeg | ✅ |
+| Resampling auf 16 kHz | `AF.resample()` / torchaudio | ✅ |
+| Pegelangleichung | `_normalize_level()` (Frontend + Backend) | ✅ |
+| Netzwerk-Transport | WebSocket Binary-Frames | ✅ |
+| Reconnection, NAT-Traversal | Manuelle WS-Reconnect-Logik | ✅ |
+| VAD (End-of-Speech) | `silero_vad` manuelles Setup | ✅ (LiveKit-Plugin) |
+
+**LiveKit-Agent erhält bereits decodierte 16-kHz-PCM-Frames** (`rtc.AudioFrame`).
+Das Audio streamt in Echtzeit — wenn das Kind aufhört zu sprechen, liegt der
+komplette Audio-Buffer bereits serverseitig vor. Die Inferenz startet **sofort**.
+
+
+---
+
+### 14.4 ONNX INT8 Quantisierung — Schritte
+
+#### Warum ONNX Runtime statt OpenVINO?
+
+| Kriterium | OpenVINO (aktuell) | ONNX Runtime (neu) |
+|---|---|---|
+| LiveKit-Ökosystem | Inkompatibel | ✅ Nativ (Silero-VAD = ONNX) |
+| INT8-Quantisierung | NNCF (braucht Kalibrierdaten) | `quantize_dynamic` (**braucht nichts**) |
+| Dependency-Gewicht | `optimum-intel[openvino]` + `openvino` | Nur `onnxruntime` |
+| CPU-Erkennung | Wählerisch bei Instruction Sets | Auto-Detect VNNI/AVX512/AVX2 |
+| Container-Größe | ~2.5 GB | ~1.2 GB |
+
+#### Schritt 1: Export HuggingFace → ONNX (~5 min)
+
+```python
+from optimum.onnxruntime import ORTModelForCTC
+from transformers import Wav2Vec2Processor
+
+model_id = "jonatasgrosman/wav2vec2-large-xlsr-53-arabic"
+
+model = ORTModelForCTC.from_pretrained(model_id, export=True)
+processor = Wav2Vec2Processor.from_pretrained(model_id)
+
+model.save_pretrained("./wav2vec2_onnx")
+processor.save_pretrained("./wav2vec2_onnx")
+```
+
+Ergebnis: `wav2vec2_onnx/model.onnx` (~1.2 GB, FP32, dynamische Time-Achse).
+
+#### Schritt 2: Graph-Optimierung (~2 min)
+
+```bash
+python -m onnxruntime.transformers.optimizer \
+    --input  wav2vec2_onnx/model.onnx \
+    --output wav2vec2_onnx/model_opt.onnx \
+    --model_type bert \
+    --opt_level 2
+```
+
+Fusioniert Attention-Blöcke, Layer-Norm, Skip-Connections → ~15–20 % schneller
+ohne jeglichen Qualitätsverlust.
+
+#### Schritt 3: Dynamische INT8-Quantisierung (~2 min)
+
+```python
+from onnxruntime.quantization import quantize_dynamic, QuantType
+
+quantize_dynamic(
+    model_input="wav2vec2_onnx/model_opt.onnx",
+    model_output="wav2vec2_onnx/model_int8.onnx",
+    weight_type=QuantType.QInt8,
+    reduce_range=True,
+    nodes_to_exclude=["final_proj"],  # CTC-Kopf bleibt FP32!
+)
+```
+
+**Kein Trainingsdaten nötig. Kein GPU nötig. Kein Post-Training.**
+
+#### Schritt 4: Validierung — GOP-Score-Vergleich (~30 min)
+
+```python
+# 20 Testwörter durch beide Modelle laufen lassen
+for word in test_words:
+    score_fp32 = run_model("model_opt.onnx", audio, word)
+    score_int8 = run_model("model_int8.onnx", audio, word)
+    diff = abs(score_fp32 - score_int8)
+    assert diff < 3.0, f"{word}: Differenz {diff} zu groß!"
+```
+
+**Akzeptanzkriterium:** Max. 3 Punkte Abweichung pro Wort.
+Falls überschritten → weitere Nodes aus Quantisierung ausschließen.
+
+#### Warum CTC-Kopf ausschließen?
+
+- Encoder (95 % Rechenzeit) → INT8 → **Speedup**
+- CTC-Projektionskopf (5 % Rechenzeit) → FP32 → **GOP-Scores geschützt**
+- WER robust gegen Logit-Rauschen; GOP liest Log-Probabilities direkt
+- Kleine Logit-Verschiebungen kippen Wörter an der 70-Punkte-Schwelle
+
+
+
+---
+
+### 14.5 Modal-Deployment — Neue Konfiguration
+
+#### Vorher (aktuell):
+
+```python
+# OpenVINO, FP32, min_containers=2, 1–8 Kerne
+CPU_REQUEST, CPU_LIMIT = 1.0, 8.0
+MIN_CONTAINERS = 2
+# Kosten: ~$70/Monat (immer 2 Container laufend)
+```
+
+#### Nachher:
+
+```python
+import modal
+
+app = modal.App("quran-asr-livekit")
+
+image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .pip_install(
+        "livekit-agents>=1.0",
+        "livekit-plugins-silero",
+        "onnxruntime>=1.18",
+        "torch",               # nur für forced_align
+        "numpy",
+        "scipy",
+    )
+    .env({"OMP_NUM_THREADS": "8", "ONNX_NUM_THREADS": "8"})
+    .run_function(preload_onnx_model)  # Modell ins Image einbrennen
+)
+
+@app.function(
+    image=image,
+    cpu=(2.0, 8.0),           # 2 garantiert, burst bis 8
+    memory=4096,
+    min_containers=0,          # SCALE-TO-ZERO
+    max_containers=5,          # PoC-Limit
+    buffer_containers=1,       # 1 warm halten bei Last
+    scaledown_window=300,      # 5 min Idle → runterfahren
+)
+def agent_entrypoint():
+    """LiveKit Agent Worker."""
+    ...
+```
+
+#### Kosten-Vergleich:
+
+| | Aktuell | Neu |
+|---|---|---|
+| Idle-Kosten | ~$70/Monat (2 Container 24/7) | **$0** (scale-to-zero) |
+| Aktive Nutzung (8h/Tag) | ~$70/Monat | **~$5–15/Monat** |
+| Cold Start | 0 ms (immer warm) | ~10–15 s (Memory Snapshot) |
+| Budget (30 €) | Reicht ~12 Tage | **Reicht ~2–6 Monate** ✅ |
+
+
+
+---
+
+### 14.6 Frontend-Änderungen
+
+#### Entfällt komplett (Dateien werden gelöscht):
+
+| Datei | Grund |
+|---|---|
+| `mobile/src/lib/audioBytes.ts` | LiveKit encoded/streamt Audio direkt |
+| `mobile/src/lib/pcm.ts` | Kein WAV-Encoding, kein Normalize mehr |
+| `mobile/src/lib/stream.ts` | WebSocket-Session → ersetzt durch LiveKit Room |
+
+#### Neue Datei: `mobile/src/lib/livekit-stream.ts`
+
+- Verbindung zu LiveKit Cloud Room
+- Audio Track publishen (Mikrofon → LiveKit, Opus automatisch)
+- DataChannel: Zielwort senden, Scores empfangen
+- Kein Audio-Processing auf dem Client
+
+#### Neue Abhängigkeiten:
+
+```json
+{
+  "@livekit/react-native": "^2.x",
+  "@livekit/react-native-webrtc": "^1.x"
+}
+```
+
+**Achtung:** LiveKit RN SDK braucht native Module → EAS Dev-Client Build
+(kein Expo Go).
+
+---
+
+### 14.7 LiveKit Cloud Setup
+
+| Eigenschaft | Wert |
+|---|---|
+| Plan | **Build (kostenlos, $0/Monat)** |
+| Inkludiert | 1.000 Agent-Session-Minuten/Monat |
+| WebRTC-Verbindung | Kostenlos |
+| Globale TURN-Server | Inkludiert |
+| Für PoC (10k User) | Ausreichend bei nicht-simultanem Betrieb |
+
+Falls 1.000 Minuten nicht reichen → Ship-Plan ($50/Monat, unbegrenzt).
+
+
+
+---
+
+### 14.8 Was sich NICHT ändert
+
+- **Gesamte Scoring-Logik** (`_gop_score`, `_tajweed_for_letter`, `_confusables`)
+- **Alignment** (`forced_align`, `_runs_of_non_blank`)
+- **Target-Analyse** (`_analyze_target`, `_strip_diacritics`, `_CONFUSABLES`-Tabelle)
+- **Gewichtungen** (0.4/0.6, 0.75/0.25, 0.75·mean + 0.25·min)
+- **Mobile UI** (alle Screens, Komponenten, expo-router)
+- **Zustand-Stores** (useProgress, useProfile, useTheme, levelFlow)
+- **Level-System, Fortschritt, Profile**
+
+---
+
+### 14.9 Umsetzungsreihenfolge
+
+| # | Aufgabe | Aufwand | Risiko |
+|---|---------|---------|--------|
+| 1 | ONNX-Export + INT8-Quantisierung (14.4, Schritte 1–3) | 1–2 h | Niedrig |
+| 2 | Validierung: GOP-Scores FP32 vs. INT8 (20 Testwörter) | 1 h | Niedrig |
+| 3 | LiveKit Cloud Account anlegen, API-Key holen | 10 min | Keines |
+| 4 | `backend/livekit_agent.py` erstellen (Agent + ONNX-Inferenz) | 1–2 Tage | Mittel |
+| 5 | Modal-Deployment mit neuem Agent testen | 2–4 h | Mittel |
+| 6 | Latenz-Benchmark: End-of-Speech → Score < 200 ms bestätigen | 1 h | Niedrig |
+| 7 | `@livekit/react-native` ins Mobile-Projekt + EAS Build | 1 Tag | Mittel |
+| 8 | `mobile/src/lib/livekit-stream.ts` — Room + DataChannel | 1 Tag | Mittel |
+| 9 | Feature-Flag: alter WS ↔ neuer LiveKit-Transport | 2 h | Niedrig |
+| 10 | End-to-End-Test mit echtem Gerät | 1 Tag | Mittel |
+| 11 | Alte Dateien entfernen (`stream.ts`, `pcm.ts`, `audioBytes.ts`) | 30 min | Keines |
+| 12 | Altes `asr_app.py` Modal-Deployment abschalten | 5 min | Keines |
+
+**Geschätzter Gesamtaufwand: ~5–7 Arbeitstage.**
+
+---
+
+### 14.10 Risiken und Mitigationen
+
+| Risiko | Mitigation |
+|--------|-----------|
+| INT8 verschiebt GOP-Scores an der 70-Punkte-Schwelle | Schritt 2: Vergleich 20 Wörter; CTC-Kopf bleibt FP32 |
+| LiveKit RN SDK inkompatibel mit Expo 54 | EAS Dev-Client Build statt Expo Go |
+| 1.000 Free-Minuten zu wenig für 10k User | Monitoring; Upgrade auf Ship ($50) wenn nötig |
+| `forced_align` braucht PyTorch | torch CPU-only (kein CUDA), nur ~200 MB |
+| Cold Start bei scale-to-zero (~10–15 s) | Memory Snapshot + `buffer_containers=1` |
+| LiveKit Silero VAD zu sensitiv für Kinder | `min_speech_duration` und `activation_threshold` tunen |
+| Modal-CPU ohne VNNI | `reduce_range=True`; ONNX Runtime wählt beste Kernels |
+
+---
+
+### 14.11 Dependency-Vergleich
+
+#### Backend — Vorher:
+
+```
+optimum-intel[openvino], openvino, torch, torchaudio, transformers,
+silero-vad, pydub, scipy, numpy, fastapi, uvicorn, python-multipart, ffmpeg (apt)
+```
+
+#### Backend — Nachher:
+
+```
+livekit-agents>=1.0, livekit-plugins-silero, onnxruntime>=1.18,
+torch (CPU-only), numpy, scipy
+```
+
+**Entfallen:** openvino, optimum-intel, torchaudio, pydub, fastapi, uvicorn,
+python-multipart, ffmpeg. Container-Image ~50 % kleiner.
+
+---
+
+### 14.12 Zusammenfassung
+
+| Metrik | Aktuell | Nach Migration |
+|--------|---------|----------------|
+| Latenz pro Wort | 1200–3000 ms | **130–200 ms** ✅ |
+| Kosten (Idle) | ~$70/Monat | **$0** (scale-to-zero) |
+| Kosten (aktiv, PoC) | ~$70/Monat | **$5–15/Monat** ✅ |
+| Netzwerk-Resilienz | Manueller WS-Reconnect | WebRTC ICE + TURN ✅ |
+| Audio-Qualität | Raw PCM/WAV über WS | Opus Adaptive Bitrate ✅ |
+| Audio-Verarbeitung Frontend | ~150 Zeilen Code | **0 Zeilen** ✅ |
+| Audio-Verarbeitung Backend | ~200 Zeilen Code | **0 Zeilen** ✅ |
+| Container-Größe | ~2.5 GB | **~1.2 GB** ✅ |
+| Cold Start | 0 s (immer 2 warm) | ~10–15 s (akzeptabel für PoC) |
+| Modell-Qualität (WER) | FP32 Baseline | **Identisch** (< 0.1 % Differenz) |
+| GOP-Score-Qualität | FP32 Baseline | **Identisch** (CTC-Kopf bleibt FP32) |
+
+---
+
+*Abschnitt 14 hinzugefügt am 21. August 2026.*
+
