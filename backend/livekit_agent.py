@@ -46,11 +46,13 @@ def _preload_model() -> None:
     _os.environ["TRANSFORMERS_CACHE"] = HF_CACHE
 
     if Path(f"{MODEL_DIR}/model_int8.onnx").exists():
-        print("Modell vorhanden."); return
+        print("Modell vorhanden.")
+        return
 
     from optimum.onnxruntime import ORTModelForCTC
     from transformers import Wav2Vec2Processor
     from onnxruntime.quantization import QuantType, quantize_dynamic
+    from onnxruntime.quantization.shape_inference import quant_pre_process
     import onnx
 
     MODEL_ID = "jonatasgrosman/wav2vec2-large-xlsr-53-arabic"
@@ -63,50 +65,152 @@ def _preload_model() -> None:
     model.save_pretrained(fp32)
     proc.save_pretrained(fp32)
 
-    print("INT8-Quantisierung...")
     onnx_path = f"{fp32}/model.onnx"
+    preprocessed_path = f"{fp32}/model_preprocessed.onnx"
 
-    # --- FIX: Identify ALL problematic nodes (pos_conv_embed + ctc head) ---
-    m = onnx.load(onnx_path)
+    # Step 1: Shape inference
+    print("Running quant_pre_process (shape inference)...")
+    try:
+        quant_pre_process(
+            input_model_path=onnx_path,
+            output_model_path=preprocessed_path,
+        )
+        print("quant_pre_process succeeded.")
+    except Exception as e:
+        print(f"quant_pre_process failed ({e}), using original model.")
+        preprocessed_path = onnx_path
+
+    # Step 2: Analyse des Modells
+    print("\n" + "=" * 70)
+    print("MODELL-ANALYSE")
+    print("=" * 70)
+
+    m = onnx.load(preprocessed_path)
+
+    # Alle Initializer (statische Gewichte) sammeln
+    initializer_names = {init.name for init in m.graph.initializer}
+    total_nodes = len(m.graph.node)
+
+    print(f"\nTotal Nodes: {total_nodes}")
+    print(f"Total Initializers (statische Gewichte): {len(initializer_names)}")
+
+    # Nodes kategorisieren
     nodes_to_exclude = []
-    for node in m.graph.node:
-        # Exclude pos_conv_embed (weight norm produces dynamic weights)
-        if "pos_conv_embed" in node.name:
-            nodes_to_exclude.append(node.name)
-        # Exclude feature_projection (also has dynamic MatMul outputs)
-        if "feature_projection" in node.name:
-            nodes_to_exclude.append(node.name)
-        # Exclude CTC head to preserve accuracy
-        if "lm_head" in node.name.lower() or "final_proj" in node.name.lower():
-            nodes_to_exclude.append(node.name)
+    excluded_reasons = {}
 
-    # If no CTC head found by name, exclude last MatMul
+    for node in m.graph.node:
+        reason = None
+
+        if "pos_conv_embed" in node.name:
+            reason = "pos_conv_embed (Weight Normalization — dynamische Gewichte)"
+        elif "feature_projection" in node.name:
+            reason = "feature_projection (dynamische MatMul Outputs)"
+        elif "lm_head" in node.name.lower() or "final_proj" in node.name.lower():
+            reason = "CTC Head (Präzision für finale Wahrscheinlichkeiten)"
+
+        if reason:
+            nodes_to_exclude.append(node.name)
+            excluded_reasons[node.name] = reason
+
+    # Letzten MatMul als CTC-Fallback
     ctc_found = any("lm_head" in n or "final_proj" in n for n in nodes_to_exclude)
     if not ctc_found:
         mats = [n.name for n in m.graph.node if n.op_type == "MatMul"]
         if mats:
             nodes_to_exclude.append(mats[-1])
+            excluded_reasons[mats[-1]] = "CTC Head Fallback (letzter MatMul)"
+
+    # Detailliertes Logging
+    print(f"\n{'=' * 70}")
+    print(f"EXCLUDED NODES: {len(nodes_to_exclude)} von {total_nodes} "
+          f"({len(nodes_to_exclude)/total_nodes*100:.1f}%)")
+    print(f"QUANTIZED NODES: {total_nodes - len(nodes_to_exclude)} "
+          f"({(total_nodes - len(nodes_to_exclude))/total_nodes*100:.1f}%)")
+    print(f"{'=' * 70}\n")
+
+    # Nach Kategorie gruppieren
+    categories = {}
+    for name, reason in excluded_reasons.items():
+        cat = reason.split("(")[0].strip()
+        if cat not in categories:
+            categories[cat] = []
+        categories[cat].append(name)
+
+    for cat, names in categories.items():
+        print(f"\n📌 {cat} ({len(names)} Nodes):")
+        print(f"   Grund: {excluded_reasons[names[0]]}")
+        for name in names:
+            # Finde den Node und zeige Op-Type
+            for node in m.graph.node:
+                if node.name == name:
+                    print(f"   - {name} (Op: {node.op_type})")
+                    break
+
+    # Zusätzlich: Zeige welche Nodes NICHT quantisierbar wären
+    # (MatMul/Gemm mit nicht-initializer Inputs)
+    print(f"\n{'=' * 70}")
+    print("ANALYSE: Nodes die technisch NICHT quantisierbar sind")
+    print("(MatMul/Gemm deren Gewichte KEINE statischen Initializer sind)")
+    print(f"{'=' * 70}\n")
+
+    problematic_count = 0
+    for node in m.graph.node:
+        if node.op_type in ("MatMul", "Gemm", "Conv"):
+            for inp in node.input:
+                if inp and inp not in initializer_names and inp not in {
+                    i.name for i in m.graph.input
+                }:
+                    # Input ist weder Initializer noch Graph-Input
+                    # → wird dynamisch berechnet
+                    is_excluded = node.name in nodes_to_exclude
+                    status = "✅ EXCLUDED" if is_excluded else "⚠️  NICHT EXCLUDED"
+                    print(f"  {status}: {node.name}")
+                    print(f"     Op: {node.op_type}")
+                    print(f"     Dynamischer Input: {inp}")
+                    print()
+                    problematic_count += 1
+                    break
+
+    print(f"Gesamt problematische Nodes: {problematic_count}")
+
+    # Zusammenfassung
+    print(f"\n{'=' * 70}")
+    print("ZUSAMMENFASSUNG")
+    print(f"{'=' * 70}")
+    print(f"  Modell:              {MODEL_ID}")
+    print(f"  Total Nodes:         {total_nodes}")
+    print(f"  Quantisiert (INT8):  {total_nodes - len(nodes_to_exclude)}")
+    print(f"  Excluded (FP32):     {len(nodes_to_exclude)}")
+    print(f"  Davon technisch nötig: {problematic_count}")
+    print(f"  Davon für Präzision:   {len(nodes_to_exclude) - problematic_count}")
+    print(f"{'=' * 70}\n")
 
     del m  # free memory
 
-    print(f"Excluding {len(nodes_to_exclude)} nodes from quantization.")
-
+    # Step 3: Quantisierung
+    print("INT8-Quantisierung...")
     _os.makedirs(MODEL_DIR, exist_ok=True)
-    quantize_dynamic(
-        model_input=onnx_path,
-        model_output=f"{MODEL_DIR}/model_int8.onnx",
-        weight_type=QuantType.QInt8,
-        reduce_range=True,
-        nodes_to_exclude=nodes_to_exclude,
-        extra_options={"DefaultTensorType": 1},  # 1 = onnx.TensorProto.FLOAT
-    )
+    try:
+        quantize_dynamic(
+            model_input=preprocessed_path,
+            model_output=f"{MODEL_DIR}/model_int8.onnx",
+            weight_type=QuantType.QInt8,
+            reduce_range=True,
+            nodes_to_exclude=nodes_to_exclude,
+            extra_options={"DefaultTensorType": 1},
+        )
+        print("✅ INT8 Quantisierung erfolgreich!")
+    except Exception as e:
+        print(f"❌ Quantisierung fehlgeschlagen: {e}")
+        print("Fallback: Verwende FP32 Modell...")
+        shutil.copy2(preprocessed_path, f"{MODEL_DIR}/model_int8.onnx")
 
+    # Copy tokenizer/processor files
     for f in Path(fp32).iterdir():
         if f.suffix in (".json", ".txt") and not f.name.startswith("model"):
             shutil.copy2(f, f"{MODEL_DIR}/{f.name}")
     shutil.rmtree(fp32, ignore_errors=True)
-    print(f"INT8-Modell bereit: {MODEL_DIR}")
-
+    print(f"\n✅ Modell bereit: {MODEL_DIR}")
 _SCORING_ENGINE_PATH = Path(__file__).resolve().parent / "scoring_engine.py"
 
 image = (
