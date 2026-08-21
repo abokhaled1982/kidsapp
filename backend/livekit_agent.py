@@ -63,28 +63,49 @@ def _preload_model() -> None:
     model.save_pretrained(fp32)
     proc.save_pretrained(fp32)
 
-    print("INT8-Quantisierung (direkt, ohne Graph-Opt)...")
+    print("INT8-Quantisierung...")
     onnx_path = f"{fp32}/model.onnx"
+
+    # --- FIX: Identify ALL problematic nodes (pos_conv_embed + ctc head) ---
     m = onnx.load(onnx_path)
-    ctc = [n.name for n in m.graph.node
-           if "lm_head" in n.name.lower() or "final_proj" in n.name.lower()]
-    if not ctc:
+    nodes_to_exclude = []
+    for node in m.graph.node:
+        # Exclude pos_conv_embed (weight norm produces dynamic weights)
+        if "pos_conv_embed" in node.name:
+            nodes_to_exclude.append(node.name)
+        # Exclude feature_projection (also has dynamic MatMul outputs)
+        if "feature_projection" in node.name:
+            nodes_to_exclude.append(node.name)
+        # Exclude CTC head to preserve accuracy
+        if "lm_head" in node.name.lower() or "final_proj" in node.name.lower():
+            nodes_to_exclude.append(node.name)
+
+    # If no CTC head found by name, exclude last MatMul
+    ctc_found = any("lm_head" in n or "final_proj" in n for n in nodes_to_exclude)
+    if not ctc_found:
         mats = [n.name for n in m.graph.node if n.op_type == "MatMul"]
-        ctc = [mats[-1]] if mats else []
+        if mats:
+            nodes_to_exclude.append(mats[-1])
+
+    del m  # free memory
+
+    print(f"Excluding {len(nodes_to_exclude)} nodes from quantization.")
 
     _os.makedirs(MODEL_DIR, exist_ok=True)
-    quantize_dynamic(model_input=onnx_path,
-                     model_output=f"{MODEL_DIR}/model_int8.onnx",
-                     weight_type=QuantType.QInt8, reduce_range=True,
-                     nodes_to_exclude=ctc,
-                     extra_options={"DefaultTensorType": 1})  # 1 = FLOAT
+    quantize_dynamic(
+        model_input=onnx_path,
+        model_output=f"{MODEL_DIR}/model_int8.onnx",
+        weight_type=QuantType.QInt8,
+        reduce_range=True,
+        nodes_to_exclude=nodes_to_exclude,
+        extra_options={"DefaultTensorType": 1},  # 1 = onnx.TensorProto.FLOAT
+    )
 
     for f in Path(fp32).iterdir():
         if f.suffix in (".json", ".txt") and not f.name.startswith("model"):
             shutil.copy2(f, f"{MODEL_DIR}/{f.name}")
     shutil.rmtree(fp32, ignore_errors=True)
     print(f"INT8-Modell bereit: {MODEL_DIR}")
-
 
 _SCORING_ENGINE_PATH = Path(__file__).resolve().parent / "scoring_engine.py"
 
