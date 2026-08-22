@@ -54,24 +54,47 @@ echo "==> Secret 'livekit-credentials' vorhanden"
 echo "==> modal $MODE livekit_agent.py"
 "$MODAL" "$MODE" livekit_agent.py
 
-# --- 5. Worker anwerfen ---------------------------------------------------
-# "deployed" heisst bei Modal nur "registriert", nicht "laeuft". Der LiveKit-
-# Worker muss laufen, sonst betritt die App einen Room ohne Agent (LK: 0/1).
-# Im Betrieb startet ihn der Token-Endpoint selbst (_ensure_worker), hier
-# einmal vorwaermen, damit der erste Nutzer nicht auf den Cold-Start wartet.
+# --- 5. Worker zyklieren --------------------------------------------------
+# Zwei Fallen auf einmal:
+#  a) "deployed" heisst bei Modal nur "registriert", nicht "laeuft". Ein
+#     LiveKit-Worker muss laufen und bei LiveKit Cloud registriert sein, sonst
+#     betritt die App einen Room, dem nie ein Agent beitritt (LK: 0/1).
+#  b) Ein bereits laufender Worker laeuft mit dem ALTEN Code weiter, bis sein
+#     Timeout greift (ASR_WORKER_TIMEOUT, default 30 min). Nach einem Deploy
+#     muss er also ersetzt werden, sonst testet man gegen den alten Stand.
+# Im Normalbetrieb startet den Worker der Token-Endpoint selbst
+# (_ensure_worker), hier wird er einmal vorgewaermt.
 if [ "$MODE" = "deploy" ]; then
-    echo "==> Worker-Status"
+    echo "==> Worker zyklieren"
     "$VENV/bin/python" - <<'PY'
 import os
+import time
+
 import modal
 
 app_name = os.environ.get("ASR_APP_NAME", "quran-asr-livekit")
+# Name gespiegelt aus livekit_agent.py (WORKER_STATE_DICT)
+state = modal.Dict.from_name("quran-asr-worker-state", create_if_missing=True)
 fn = modal.Function.from_name(app_name, "run_agent")
-stats = fn.get_current_stats()
-if stats.num_running_inputs > 0 or stats.backlog > 0:
-    print(f"    Worker laeuft bereits ({stats.num_running_inputs} Invocation(s)).")
-else:
-    call = fn.spawn()
-    print(f"    Worker gestartet: {call.object_id}")
+
+old_id = state.get("call_id")
+if old_id:
+    try:
+        modal.FunctionCall.from_id(old_id).cancel()
+        print(f"    alter Worker beendet: {old_id}")
+    except Exception as exc:
+        print(f"    alter Worker ({old_id}) nicht kuendbar: {exc!r}")
+
+# Warten bis Modal den gecancelten Input abgeraeumt hat. Sonst sieht der
+# Stats-Check unten noch den alten Worker und startet keinen neuen.
+for _ in range(30):
+    stats = fn.get_current_stats()
+    if stats.num_running_inputs == 0 and stats.backlog == 0:
+        break
+    time.sleep(1)
+
+call = fn.spawn()
+state["call_id"] = call.object_id
+print(f"    neuer Worker: {call.object_id}")
 PY
 fi

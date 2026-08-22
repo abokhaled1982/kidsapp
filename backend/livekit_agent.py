@@ -39,6 +39,9 @@ WORKER_TIMEOUT = int(os.environ.get("ASR_WORKER_TIMEOUT", "1800"))
 MODEL_DIR = "/opt/models/wav2vec2_int8"
 HF_CACHE = "/root/.cache/huggingface"
 LIVEKIT_SECRET = "livekit-credentials"
+# Haelt die Call-ID des laufenden Workers, damit ein Redeploy den alten Worker
+# (der noch mit dem alten Code laeuft) gezielt beenden kann — siehe deploy.sh.
+WORKER_STATE_DICT = "quran-asr-worker-state"
 
 CPU_REQUEST, CPU_LIMIT = 2.0, 8.0
 MEMORY_MB = 4096
@@ -258,6 +261,9 @@ def run_agent():
     import json
     import logging
     import sys
+    import time
+
+    _t_boot = time.monotonic()
 
     import numpy as np
     from livekit import rtc, agents
@@ -271,7 +277,10 @@ def run_agent():
     logger = logging.getLogger("quran-asr")
 
     engine = ScoringEngine(MODEL_DIR, N_THREADS)
-    logger.info("ScoringEngine geladen (ONNX INT8).")
+    # Boot-Dauer mitloggen: sie ist das Budget, das der Client beim Cold Start
+    # ueberbruecken muss (AGENT_WAIT_MS in mobile/src/lib/livekit-stream.ts).
+    logger.info("ScoringEngine geladen (ONNX INT8) — Boot %.1fs.",
+                time.monotonic() - _t_boot)
 
     # AudioStream liefert 20ms-Frames -> Frame-Zahl == Millisekunden / 20.
     FRAME_MS = 20
@@ -498,7 +507,11 @@ async def _ensure_worker() -> str:
         # buffer_container mit, der noch keinen Worker ausfuehrt.
         if stats.num_running_inputs > 0 or stats.backlog > 0:
             return "running"
-        await run_agent.spawn.aio()
+        call = await run_agent.spawn.aio()
+        # Call-ID ablegen, damit deploy.sh den Worker beim naechsten Deploy
+        # gezielt ersetzen kann (sonst laeuft er mit altem Code weiter).
+        state = modal.Dict.from_name(WORKER_STATE_DICT, create_if_missing=True)
+        await state.put.aio("call_id", call.object_id)
         return "spawned"
     except Exception as exc:
         # Der Token darf nie an der Worker-Logik scheitern — ohne Token kaeme

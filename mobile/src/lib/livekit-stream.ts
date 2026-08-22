@@ -29,8 +29,15 @@ import {
 import { useDebug } from "@/store/useDebug";
 import type { AssessResponse, AssessUnit, ServerWordTimings } from "@/lib/api";
 
-const TOKEN_TIMEOUT_MS = 8000;
-const AGENT_WAIT_MS = 12000; // Modal-Container darf kalt starten
+// Beide Timeouts muessen den Modal-Cold-Start ueberbruecken, sonst meldet die
+// App "Backend laeuft nicht", obwohl der Worker gerade erst hochfaehrt.
+// Der Token-Endpoint startet den Agent-Worker mit (_ensure_worker in
+// backend/livekit_agent.py); danach braucht der Worker Container-Start +
+// ONNX-Load, bevor er dem Room beitritt. Gemessen kalt: Token ~5 s,
+// Worker-Boot danach nochmal ein paar Sekunden. Warm loesen beide sofort auf
+// (Event-basiert), die groesseren Werte kosten also nur im Fehlerfall Zeit.
+const TOKEN_TIMEOUT_MS = 15000;
+const AGENT_WAIT_MS = 30000;
 const READY_TIMEOUT_MS = 6000;
 const WORD_TIMEOUT_MS = 15000;
 const AYAH_TIMEOUT_MS = 30000;
