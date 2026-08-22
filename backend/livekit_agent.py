@@ -4,7 +4,7 @@ Architektur (siehe docs/backend-cpu-migration-und-scoring.md, Abschnitt 14):
   - LiveKit Agent verbindet sich zu LiveKit Cloud Room
   - Empfaengt Audio als 16 kHz PCM-Frames (kein Decode noetig)
   - Energy-VAD erkennt End-of-Speech
-  - ONNX Runtime INT8 wav2vec2 Forward (~80-150 ms)
+  - OpenVINO FP32 wav2vec2 Forward (dasselbe Modell wie asr_app.py)
   - GOP-Scoring + Alignment (unveraenderte Logik)
   - Ergebnis via LiveKit DataChannel zurueck
 
@@ -17,7 +17,6 @@ Dev:
 from __future__ import annotations
 
 import os
-import shutil
 from pathlib import Path
 
 import modal
@@ -36,7 +35,8 @@ MAX_CONTAINERS = int(os.environ.get("ASR_MAX_CONTAINERS", "5"))
 # mitten in der Sure der Agent wegstirbt, kurz genug fuer scale-to-zero.
 WORKER_TIMEOUT = int(os.environ.get("ASR_WORKER_TIMEOUT", "1800"))
 
-MODEL_DIR = "/opt/models/wav2vec2_int8"
+MODEL_ID = "jonatasgrosman/wav2vec2-large-xlsr-53-arabic"
+MODEL_DIR = "/opt/models/wav2vec2_ar_fp32"
 HF_CACHE = "/root/.cache/huggingface"
 LIVEKIT_SECRET = "livekit-credentials"
 # Haelt die Call-ID des laufenden Workers, damit ein Redeploy den alten Worker
@@ -49,189 +49,53 @@ N_THREADS = 8
 
 
 def _preload_model() -> None:
-    """ONNX INT8 Modell waehrend Image-Build exportieren."""
+    """OpenVINO IR (FP32) waehrend des Image-Builds exportieren.
+
+    Bewusst FP32, nicht INT8. Gemessen im selben Container mit 8 Threads war die
+    dynamische INT8-Quantisierung sogar *langsamer* als dasselbe Modell
+    unquantisiert (~304 ms pro Forward gegen ~250-271 ms, beide ONNX) und
+    verschob die Log-Probs im Mittel um 0.579 nat (p95 1.740).
+    Das GOP-Scoring liest absolute Log-Wahrscheinlichkeiten - `post_score` skaliert
+    (target_lp + 3) / 3, `llr_score` sigmoidet die Differenz zum Konfusionslaut -
+    also nicht bloss das argmax. Die Abweichung schlug deshalb mit 11-34 Punkten
+    in die Buchstaben-Scores durch. Siehe docs/backend-cpu-migration-und-scoring.md,
+    Abschnitt 3.3 ("Den CTC-Kopf nicht quantisieren").
+
+    Identischer Export wie `_preload_models` in asr_app.py, damit beide Backends
+    dasselbe Modell rechnen und Scores vergleichbar bleiben.
+    """
     import os as _os
     _os.environ["HF_HOME"] = HF_CACHE
     _os.environ["TRANSFORMERS_CACHE"] = HF_CACHE
 
-    if Path(f"{MODEL_DIR}/model_int8.onnx").exists():
+    if Path(f"{MODEL_DIR}/openvino_model.xml").exists():
         print("Modell vorhanden.")
         return
 
-    from optimum.onnxruntime import ORTModelForCTC
+    from optimum.intel import OVModelForCTC
     from transformers import Wav2Vec2Processor
-    from onnxruntime.quantization import QuantType, quantize_dynamic
-    from onnxruntime.quantization.shape_inference import quant_pre_process
-    import onnx
 
-    MODEL_ID = "jonatasgrosman/wav2vec2-large-xlsr-53-arabic"
-    fp32 = "/tmp/wav2vec2_fp32"
+    print(f"Export OpenVINO FP32 IR -> {MODEL_DIR}")
+    processor = Wav2Vec2Processor.from_pretrained(MODEL_ID)
+    # compile=False: der Build-Container braucht das Modell nicht auszufuehren,
+    # nur zu serialisieren. Kompiliert wird zur Laufzeit in der ScoringEngine.
+    model = OVModelForCTC.from_pretrained(MODEL_ID, export=True, compile=False)
+    model.save_pretrained(MODEL_DIR)
+    processor.save_pretrained(MODEL_DIR)
+    print(f"Modell bereit: {MODEL_DIR}")
 
-    print("Export ONNX FP32...")
-    model = ORTModelForCTC.from_pretrained(MODEL_ID, export=True)
-    proc = Wav2Vec2Processor.from_pretrained(MODEL_ID)
-    _os.makedirs(fp32, exist_ok=True)
-    model.save_pretrained(fp32)
-    proc.save_pretrained(fp32)
 
-    onnx_path = f"{fp32}/model.onnx"
-    preprocessed_path = f"{fp32}/model_preprocessed.onnx"
-
-    # Step 1: Shape inference
-    print("Running quant_pre_process (shape inference)...")
-    try:
-        quant_pre_process(
-            input_model_path=onnx_path,
-            output_model_path=preprocessed_path,
-        )
-        print("quant_pre_process succeeded.")
-    except Exception as e:
-        print(f"quant_pre_process failed ({e}), using original model.")
-        preprocessed_path = onnx_path
-
-    # Step 2: Analyse des Modells
-    print("\n" + "=" * 70)
-    print("MODELL-ANALYSE")
-    print("=" * 70)
-
-    m = onnx.load(preprocessed_path)
-
-    # Alle Initializer (statische Gewichte) sammeln
-    initializer_names = {init.name for init in m.graph.initializer}
-    total_nodes = len(m.graph.node)
-
-    print(f"\nTotal Nodes: {total_nodes}")
-    print(f"Total Initializers (statische Gewichte): {len(initializer_names)}")
-
-    # Nodes kategorisieren
-    nodes_to_exclude = []
-    excluded_reasons = {}
-
-    for node in m.graph.node:
-        reason = None
-
-        if "pos_conv_embed" in node.name:
-            reason = "pos_conv_embed (Weight Normalization — dynamische Gewichte)"
-        elif "feature_projection" in node.name:
-            reason = "feature_projection (dynamische MatMul Outputs)"
-        elif "lm_head" in node.name.lower() or "final_proj" in node.name.lower():
-            reason = "CTC Head (Präzision für finale Wahrscheinlichkeiten)"
-
-        if reason:
-            nodes_to_exclude.append(node.name)
-            excluded_reasons[node.name] = reason
-
-    # Letzten MatMul als CTC-Fallback
-    ctc_found = any("lm_head" in n or "final_proj" in n for n in nodes_to_exclude)
-    if not ctc_found:
-        mats = [n.name for n in m.graph.node if n.op_type == "MatMul"]
-        if mats:
-            nodes_to_exclude.append(mats[-1])
-            excluded_reasons[mats[-1]] = "CTC Head Fallback (letzter MatMul)"
-
-    # Detailliertes Logging
-    print(f"\n{'=' * 70}")
-    print(f"EXCLUDED NODES: {len(nodes_to_exclude)} von {total_nodes} "
-          f"({len(nodes_to_exclude)/total_nodes*100:.1f}%)")
-    print(f"QUANTIZED NODES: {total_nodes - len(nodes_to_exclude)} "
-          f"({(total_nodes - len(nodes_to_exclude))/total_nodes*100:.1f}%)")
-    print(f"{'=' * 70}\n")
-
-    # Nach Kategorie gruppieren
-    categories = {}
-    for name, reason in excluded_reasons.items():
-        cat = reason.split("(")[0].strip()
-        if cat not in categories:
-            categories[cat] = []
-        categories[cat].append(name)
-
-    for cat, names in categories.items():
-        print(f"\n📌 {cat} ({len(names)} Nodes):")
-        print(f"   Grund: {excluded_reasons[names[0]]}")
-        for name in names:
-            # Finde den Node und zeige Op-Type
-            for node in m.graph.node:
-                if node.name == name:
-                    print(f"   - {name} (Op: {node.op_type})")
-                    break
-
-    # Zusätzlich: Zeige welche Nodes NICHT quantisierbar wären
-    # (MatMul/Gemm mit nicht-initializer Inputs)
-    print(f"\n{'=' * 70}")
-    print("ANALYSE: Nodes die technisch NICHT quantisierbar sind")
-    print("(MatMul/Gemm deren Gewichte KEINE statischen Initializer sind)")
-    print(f"{'=' * 70}\n")
-
-    problematic_count = 0
-    for node in m.graph.node:
-        if node.op_type in ("MatMul", "Gemm", "Conv"):
-            for inp in node.input:
-                if inp and inp not in initializer_names and inp not in {
-                    i.name for i in m.graph.input
-                }:
-                    # Input ist weder Initializer noch Graph-Input
-                    # → wird dynamisch berechnet
-                    is_excluded = node.name in nodes_to_exclude
-                    status = "✅ EXCLUDED" if is_excluded else "⚠️  NICHT EXCLUDED"
-                    print(f"  {status}: {node.name}")
-                    print(f"     Op: {node.op_type}")
-                    print(f"     Dynamischer Input: {inp}")
-                    print()
-                    problematic_count += 1
-                    break
-
-    print(f"Gesamt problematische Nodes: {problematic_count}")
-
-    # Zusammenfassung
-    print(f"\n{'=' * 70}")
-    print("ZUSAMMENFASSUNG")
-    print(f"{'=' * 70}")
-    print(f"  Modell:              {MODEL_ID}")
-    print(f"  Total Nodes:         {total_nodes}")
-    print(f"  Quantisiert (INT8):  {total_nodes - len(nodes_to_exclude)}")
-    print(f"  Excluded (FP32):     {len(nodes_to_exclude)}")
-    print(f"  Davon technisch nötig: {problematic_count}")
-    print(f"  Davon für Präzision:   {len(nodes_to_exclude) - problematic_count}")
-    print(f"{'=' * 70}\n")
-
-    del m  # free memory
-
-    # Step 3: Quantisierung
-    print("INT8-Quantisierung...")
-    _os.makedirs(MODEL_DIR, exist_ok=True)
-    try:
-        quantize_dynamic(
-            model_input=preprocessed_path,
-            model_output=f"{MODEL_DIR}/model_int8.onnx",
-            weight_type=QuantType.QInt8,
-            reduce_range=True,
-            nodes_to_exclude=nodes_to_exclude,
-            extra_options={"DefaultTensorType": 1},
-        )
-        print("✅ INT8 Quantisierung erfolgreich!")
-    except Exception as e:
-        print(f"❌ Quantisierung fehlgeschlagen: {e}")
-        print("Fallback: Verwende FP32 Modell...")
-        shutil.copy2(preprocessed_path, f"{MODEL_DIR}/model_int8.onnx")
-
-    # Copy tokenizer/processor files
-    for f in Path(fp32).iterdir():
-        if f.suffix in (".json", ".txt") and not f.name.startswith("model"):
-            shutil.copy2(f, f"{MODEL_DIR}/{f.name}")
-    shutil.rmtree(fp32, ignore_errors=True)
-    print(f"\n✅ Modell bereit: {MODEL_DIR}")
 _SCORING_ENGINE_PATH = Path(__file__).resolve().parent / "scoring_engine.py"
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
         "livekit-agents>=1.0", "livekit-plugins-silero",
-        "onnxruntime>=1.18", "onnx",
-        "optimum[onnxruntime]", "transformers",
+        "optimum-intel[openvino]", "transformers",
         "torch", "torchaudio", "numpy", "scipy",
     )
     .env({"HF_HOME": HF_CACHE, "TRANSFORMERS_CACHE": HF_CACHE,
-          "OMP_NUM_THREADS": str(N_THREADS)})
+          "OMP_NUM_THREADS": str(N_THREADS), "OV_THREADS": str(N_THREADS)})
     .run_function(_preload_model)
     .add_local_file(str(_SCORING_ENGINE_PATH), "/root/scoring_engine.py", copy=True)
 )
@@ -279,7 +143,7 @@ def run_agent():
     engine = ScoringEngine(MODEL_DIR, N_THREADS)
     # Boot-Dauer mitloggen: sie ist das Budget, das der Client beim Cold Start
     # ueberbruecken muss (AGENT_WAIT_MS in mobile/src/lib/livekit-stream.ts).
-    logger.info("ScoringEngine geladen (ONNX INT8) — Boot %.1fs.",
+    logger.info("ScoringEngine geladen (OpenVINO FP32) — Boot %.1fs.",
                 time.monotonic() - _t_boot)
 
     # AudioStream liefert 20ms-Frames -> Frame-Zahl == Millisekunden / 20.
@@ -293,7 +157,7 @@ def run_agent():
     async def _stream_frames(make_generator):
         """Blockierenden Scoring-Generator im Thread laufen lassen und die Frames
         im Event-Loop ausgeben, sobald sie fertig sind. Ohne das wuerde der
-        ONNX-Forward die Audio-Ingestion des Rooms anhalten."""
+        OpenVINO-Forward die Audio-Ingestion des Rooms anhalten."""
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue()
         sentinel = object()
@@ -465,7 +329,7 @@ def run_agent():
     # THREAD statt des Default PROCESS ist hier Pflicht, nicht Geschmack:
     # `entrypoint` ist eine Closure ueber `engine` und laesst sich nicht in einen
     # Forkserver-Child picklen. Ausserdem wuerde der Prozess-Executor in prod
-    # 17 Idle-Prozesse vorwaermen — jeder mit eigenem ONNX-Speicher, in einem
+    # 17 Idle-Prozesse vorwaermen — jeder mit eigener Modellkopie, in einem
     # Modal-Container mit 4 GB. Im Thread bleibt die eine geladene Engine, und
     # der Forward-Pass blockiert den Loop ohnehin nicht (siehe _stream_frames).
     options = WorkerOptions(

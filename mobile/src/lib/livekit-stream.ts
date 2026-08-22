@@ -33,7 +33,7 @@ import type { AssessResponse, AssessUnit, ServerWordTimings } from "@/lib/api";
 // App "Backend laeuft nicht", obwohl der Worker gerade erst hochfaehrt.
 // Der Token-Endpoint startet den Agent-Worker mit (_ensure_worker in
 // backend/livekit_agent.py); danach braucht der Worker Container-Start +
-// ONNX-Load, bevor er dem Room beitritt. Gemessen kalt: Token ~5 s,
+// OpenVINO-Load, bevor er dem Room beitritt. Gemessen kalt: Token ~5 s,
 // Worker-Boot danach nochmal ein paar Sekunden. Warm loesen beide sofort auf
 // (Event-basiert), die groesseren Werte kosten also nur im Fehlerfall Zeit.
 const TOKEN_TIMEOUT_MS = 15000;

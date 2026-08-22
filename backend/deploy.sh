@@ -42,13 +42,25 @@ echo "==> Modal-Profil: $("$MODAL" profile current)"
 # --- 3. Secret ------------------------------------------------------------
 # livekit_agent.py macht Secret.from_name("livekit-credentials") beim Import;
 # fehlt das Secret, bricht das Deploy ab. Also vorher pruefen.
-if ! "$MODAL" secret list 2>/dev/null | grep -q "livekit-credentia"; then
-    echo "FEHLER: Modal-Secret 'livekit-credentials' fehlt."
-    echo "  1. backend/.env anlegen mit LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET"
-    echo "  2. bash backend/scripts/setup_modal_secret.sh   (nutzt dieses venv-modal)"
-    exit 1
+#
+# --json ist hier Pflicht, nicht Kosmetik: die Tabellenausgabe von
+# "modal secret list" kuerzt Namen auf die Terminalbreite ("livekit-cre…"),
+# ein grep auf den vollen Namen schlaegt also je nach Fenstergroesse fehl und
+# meldet ein Secret als fehlend, das laengst existiert.
+SECRET_NAME="livekit-credentials"
+if secrets_json="$("$MODAL" secret list --json 2>/dev/null)"; then
+    if ! grep -q "\"$SECRET_NAME\"" <<<"$secrets_json"; then
+        echo "FEHLER: Modal-Secret '$SECRET_NAME' fehlt."
+        echo "  1. backend/.env anlegen mit LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET"
+        echo "  2. bash backend/scripts/setup_modal_secret.sh   (nutzt dieses venv-modal)"
+        exit 1
+    fi
+    echo "==> Secret '$SECRET_NAME' vorhanden"
+else
+    # Aeltere Clients kennen --json nicht. Hier nicht abbrechen: fehlt das
+    # Secret wirklich, meldet das Deploy selbst es unmissverstaendlich.
+    echo "==> Secret-Check uebersprungen ('modal secret list --json' nicht verfuegbar)"
 fi
-echo "==> Secret 'livekit-credentials' vorhanden"
 
 # --- 4. Deploy ------------------------------------------------------------
 echo "==> modal $MODE livekit_agent.py"

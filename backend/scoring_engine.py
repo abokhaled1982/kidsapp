@@ -1,4 +1,4 @@
-"""ONNX INT8 Scoring Engine — unveraenderte GOP-Logik, ohne Audio-Decode.
+"""OpenVINO-FP32-Scoring-Engine — unveraenderte GOP-Logik, ohne Audio-Decode.
 
 Wird von livekit_agent.py importiert. Keine Modal-Abhaengigkeit hier.
 """
@@ -7,17 +7,19 @@ from __future__ import annotations
 
 
 class ScoringEngine:
-    """ONNX INT8 wav2vec2 + GOP-Scoring.
+    """OpenVINO FP32 wav2vec2 + GOP-Scoring.
 
     Identische Scoring-Logik wie ASR-Klasse in asr_app.py, aber:
     - Kein _decode_audio (LiveKit liefert PCM)
     - Kein _normalize_level (LiveKit Signal ist clean)
-    - ONNX Runtime statt OpenVINO
     """
 
     def __init__(self, model_dir: str, n_threads: int = 8):
+        import os
+        import threading
+
         import numpy as np
-        import onnxruntime as ort
+        import openvino as ov
         import torch
         import torchaudio.functional as AF
         from scipy.signal import butter, sosfiltfilt
@@ -28,18 +30,27 @@ class ScoringEngine:
         self.AF = AF
         self.SR = 16000
 
-        # --- ONNX Session (INT8) ---
-        sess_opts = ort.SessionOptions()
-        sess_opts.intra_op_num_threads = n_threads
-        sess_opts.inter_op_num_threads = 1
-        sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-
-        int8_path = f"{model_dir}/model_int8.onnx"
-        self._session = ort.InferenceSession(
-            int8_path, providers=["CPUExecutionProvider"], sess_options=sess_opts,
-        )
-        self._input_name = self._session.get_inputs()[0].name
-        self._output_name = self._session.get_outputs()[0].name
+        # --- OpenVINO FP32 (Konfiguration 1:1 aus asr_app.py) ---
+        # LATENCY + ein Stream: es wird immer nur eine Aeusserung bewertet, nie
+        # ein Batch. CACHE_DIR spart beim naechsten Worker-Start das Kompilieren.
+        # Keine INT8-Quantisierung: gemessen langsamer und sie verschiebt die
+        # absoluten Log-Probs, die das GOP-Scoring liest (siehe _preload_model
+        # in livekit_agent.py).
+        ov_config = {
+            "PERFORMANCE_HINT": "LATENCY",
+            "NUM_STREAMS": "1",
+            "INFERENCE_NUM_THREADS": int(n_threads),
+            "CACHE_DIR": os.environ.get("OV_CACHE_DIR", "/tmp/ov_cache"),
+        }
+        compiled = ov.Core().compile_model(
+            f"{model_dir}/openvino_model.xml", "CPU", ov_config)
+        self._ov_request = compiled.create_infer_request()
+        self._ov_input = compiled.input(0)
+        self._ov_output = compiled.output(0)
+        # Eine wiederverwendete InferRequest ist billiger als eine pro Forward,
+        # darf aber nur seriell benutzt werden - der Lock haelt das ein, auch
+        # wenn der Agent-Loop und ein Scoring-Thread gleichzeitig hier landen.
+        self._ov_lock = threading.Lock()
 
         # --- Processor ---
         self.asr_processor = Wav2Vec2Processor.from_pretrained(model_dir)
@@ -48,8 +59,8 @@ class ScoringEngine:
         self._ID_TO_CHAR = {tid: c for c, tid in self.ASR_VOCAB.items()}
 
         # --- Warm-up ---
-        dummy = np.zeros((1, 2 * self.SR), dtype=np.float32)
-        self._session.run([self._output_name], {self._input_name: dummy})
+        self._ov_request.infer(
+            {self._ov_input: np.zeros((1, 2 * self.SR), dtype=np.float32)})
 
         # --- Signalkette ---
         self._HPF_SOS = butter(2, 80.0, btype="highpass", fs=self.SR, output="sos")
@@ -96,20 +107,22 @@ class ScoringEngine:
         audio = self._highpass(pcm_samples)
         return self._pad_context(audio)
 
-    # --- ASR Inferenz (ONNX INT8) ---
+    # --- ASR Inferenz (OpenVINO FP32) ---
 
     def run_asr(self, audio):
-        """ONNX INT8 Forward -> (log_probs, transcription)."""
-        inputs = self.asr_processor(
-            audio, sampling_rate=self.SR, return_tensors="np", padding=True
-        )
-        values = inputs.input_values.astype(self.np.float32, copy=False)
-        logits = self._session.run(
-            [self._output_name], {self._input_name: values})[0]
-        logits_t = self.torch.from_numpy(logits)
-        log_probs = self.torch.log_softmax(logits_t.float(), dim=-1).cpu()
-        transcription = self.asr_processor.batch_decode(
-            log_probs.argmax(dim=-1))[0]
+        """OpenVINO FP32 Forward -> (log_probs, transcription)."""
+        with self.torch.inference_mode():
+            inputs = self.asr_processor(
+                audio, sampling_rate=self.SR, return_tensors="np", padding=True
+            )
+            values = inputs.input_values.astype(self.np.float32, copy=False)
+            with self._ov_lock:
+                logits = self._ov_request.infer(
+                    {self._ov_input: values})[self._ov_output].copy()
+            logits_t = self.torch.from_numpy(logits)
+            log_probs = self.torch.log_softmax(logits_t.float(), dim=-1).cpu()
+            transcription = self.asr_processor.batch_decode(
+                log_probs.argmax(dim=-1))[0]
         return log_probs, transcription
 
     # --- Hilfsfunktionen (identisch zu asr_app.py) ---
