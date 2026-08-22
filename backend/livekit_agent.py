@@ -30,6 +30,12 @@ APP_NAME = os.environ.get("ASR_APP_NAME", "quran-asr-livekit")
 MIN_CONTAINERS = int(os.environ.get("ASR_MIN_CONTAINERS", "0"))
 MAX_CONTAINERS = int(os.environ.get("ASR_MAX_CONTAINERS", "5"))
 
+# Lebensdauer eines Worker-Starts. Der Worker laeuft (asyncio.Future) bis zum
+# Timeout, d.h. das Fenster ist gleichzeitig die Obergrenze fuer eine
+# Uebungssitzung UND fuer die Abrechnung. 30 min: lange genug, dass keinem Kind
+# mitten in der Sure der Agent wegstirbt, kurz genug fuer scale-to-zero.
+WORKER_TIMEOUT = int(os.environ.get("ASR_WORKER_TIMEOUT", "1800"))
+
 MODEL_DIR = "/opt/models/wav2vec2_int8"
 HF_CACHE = "/root/.cache/huggingface"
 LIVEKIT_SECRET = "livekit-credentials"
@@ -244,7 +250,7 @@ _SECRETS = [modal.Secret.from_name(LIVEKIT_SECRET)]
     max_containers=MAX_CONTAINERS,
     buffer_containers=1,
     scaledown_window=300,
-    timeout=600,
+    timeout=WORKER_TIMEOUT,
 )
 def run_agent():
     """LiveKit Agent — empfaengt Audio, scored, sendet Ergebnis."""
@@ -471,6 +477,37 @@ token_image = (
 )
 
 
+async def _ensure_worker() -> str:
+    """Startet den Agent-Worker, falls gerade keiner laeuft.
+
+    `modal deploy` *registriert* run_agent nur — gestartet wird die Funktion
+    dadurch nicht, und `min_containers` waermt bloss einen leeren Container vor,
+    ohne den Body auszufuehren. Ein LiveKit-Worker muss aber bei LiveKit Cloud
+    registriert sein, *bevor* dort ein Job in den Room dispatcht werden kann;
+    sonst sitzt die App in einem Room ohne Agent ("LK: 0/1").
+
+    Der Token-Abruf ist der natuerliche Trigger: die App holt den JWT
+    unmittelbar vor dem Room-Join. So bleibt es bei scale-to-zero im Idle
+    (Kostenziel aus docs/backend-cpu-migration-und-scoring.md) und der Worker
+    steht trotzdem ohne manuellen Eingriff.
+    """
+    try:
+        stats = await run_agent.get_current_stats.aio()
+        # num_running_inputs = tatsaechlich laufende Worker-Invocations.
+        # num_total_runners waere falsch: das zaehlt auch den leeren
+        # buffer_container mit, der noch keinen Worker ausfuehrt.
+        if stats.num_running_inputs > 0 or stats.backlog > 0:
+            return "running"
+        await run_agent.spawn.aio()
+        return "spawned"
+    except Exception as exc:
+        # Der Token darf nie an der Worker-Logik scheitern — ohne Token kaeme
+        # die App nicht mal in den Room, und ein bereits laufender Worker
+        # wuerde unerreichbar.
+        print(f"_ensure_worker fehlgeschlagen: {exc!r}")
+        return "unknown"
+
+
 @app.function(image=token_image, secrets=_SECRETS, cpu=0.25, memory=256)
 @modal.fastapi_endpoint(method="POST")
 async def get_token(request: dict):
@@ -507,7 +544,8 @@ async def get_token(request: dict):
         ))
 
     jwt = token.to_jwt()
-    return {"token": jwt, "url": lk_url, "room": room_name}
+    worker = await _ensure_worker()
+    return {"token": jwt, "url": lk_url, "room": room_name, "worker": worker}
 
 
 @app.local_entrypoint()

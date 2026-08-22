@@ -9,7 +9,7 @@
 // livekit-stream.ts, weil das Mikrofon waehrend der TTS zu bleiben muss.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useTrackVolume } from "@livekit/react-native";
+import { useTrackVolume } from "@/lib/webrtc";
 import type { LocalAudioTrack } from "livekit-client";
 
 import {

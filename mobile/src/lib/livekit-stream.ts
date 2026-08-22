@@ -16,6 +16,9 @@
 // Voraussetzungen: EAS Dev-Client Build (kein Expo Go), registerGlobals() im
 // Root-Layout.
 
+// Zuerst: setzt die WebRTC-Globals, die livekit-client erwartet.
+import { requireLiveKit } from "@/lib/webrtc";
+
 import {
   Room,
   RoomEvent,
@@ -23,7 +26,6 @@ import {
   createLocalAudioTrack,
   type LocalAudioTrack,
 } from "livekit-client";
-import { AudioSession, AndroidAudioTypePresets } from "@livekit/react-native";
 import { useDebug } from "@/store/useDebug";
 import type { AssessResponse, AssessUnit, ServerWordTimings } from "@/lib/api";
 
@@ -219,6 +221,10 @@ class LiveKitSession {
     if (this.connecting) return this.connecting;
 
     this.connecting = (async () => {
+      // Vor dem Token-Request pruefen: fehlt das native Modul, soll die
+      // Meldung nicht erst nach einem Netzwerk-Roundtrip kommen.
+      const { AudioSession, AndroidAudioTypePresets } = requireLiveKit();
+
       const { token, url, room: roomName } = await fetchLiveKitToken(this.config);
 
       // Android-Audio-Session: "media" statt "communication", damit die
@@ -538,7 +544,9 @@ class LiveKitSession {
     this.connecting = null;
     if (this.audioSessionStarted) {
       this.audioSessionStarted = false;
-      AudioSession.stopAudioSession().catch(() => {});
+      // Das Flag steht nur, wenn connect() das Modul schon geladen hat -
+      // requireLiveKit() kann hier also nicht werfen.
+      requireLiveKit().AudioSession.stopAudioSession().catch(() => {});
     }
   }
 }
