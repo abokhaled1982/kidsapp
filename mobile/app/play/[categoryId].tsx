@@ -9,7 +9,7 @@
 // Die Dichte kommt aus dem Levelplan (Anforderung 8): Level 5 und 6 bekommen
 // grosse Bilder, wenig Text und riesige Tasten, ab Level 7 wird es kompakter.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { View, Text, Pressable, ActivityIndicator, Platform, StyleSheet, ScrollView } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
@@ -18,9 +18,8 @@ import { Ionicons } from "@expo/vector-icons";
 
 import { wordSource } from "@/data/wordSources";
 import { speakArabic, stopSpeaking } from "@/lib/tts";
-import { assessAudioSmart, type AssessResponse, type AssessMeta } from "@/lib/api";
-import { getStreamSession } from "@/lib/stream";
-import { useAutoRecorder } from "@/hooks/useAutoRecorder";
+import type { AssessResponse, AssessMeta } from "@/lib/api";
+import { useLiveKitTurn, isCancelled, type Prelude } from "@/hooks/useLiveKitTurn";
 import { useBackend } from "@/store/useBackend";
 import { useProfile } from "@/store/useProfile";
 import { useProgress } from "@/store/useProgress";
@@ -33,16 +32,27 @@ import { StarBurst } from "@/components/StarBurst";
 import { PulsingMic } from "@/components/PulsingMic";
 import { PictureTile } from "@/components/PictureTile";
 
-// "ready" = das Kind liest selbst vor, das Mikrofon startet gleich. Diese Phase
-// gibt es nur ab Level 7 (audioFirst = false).
-type Phase = "idle" | "ready" | "tts" | "listening" | "processing" | "result" | "error";
+// "ready" = das Kind liest selbst vor, das Mikrofon geht gleich auf. Diese Phase
+// gibt es nur ab Level 7 (audioFirst = false). "connecting" ist neu: der Agent
+// laeuft auf Modal und darf beim ersten Wort kalt starten.
+type Phase =
+  | "idle"
+  | "connecting"
+  | "ready"
+  | "tts"
+  | "listening"
+  | "processing"
+  | "result"
+  | "error";
+
+// Lesezeit ab Level 7, bevor das Mikrofon aufgeht.
+const READ_MS = 900;
 
 export default function PlayScreen() {
   const { categoryId, start } = useLocalSearchParams<{ categoryId: string; start?: string }>();
   const router = useRouter();
   const c = useTheme();
-  const backendUrl = useBackend((s) => s.url);
-  const backendToken = useBackend((s) => s.token);
+  const tokenEndpoint = useBackend((s) => s.tokenEndpoint);
   const addResult = useProgress((s) => s.addResult);
   const profile = useProfile((s) => s.profile);
   const plan = levelPlan(profile?.level ?? 5);
@@ -66,31 +76,50 @@ export default function PlayScreen() {
 
   const [windowStart, setWindowStart] = useState(startIndex);
   const [idx, setIdx] = useState(startIndex);
-  const [phase, setPhase] = useState<Phase>("idle");
   const [result, setResult] = useState<AssessResponse | null>(null);
   const [meta, setMeta] = useState<AssessMeta | null>(null);
   const [errMsg, setErrMsg] = useState<string | null>(null);
   const [roundDone, setRoundDone] = useState(false);
   const [wins, setWins] = useState(0);
 
+  const turn = useLiveKitTurn();
+
   const sessionEnd = Math.min(windowStart + ui.maxItemsPerSession, items.length);
   const sessionSize = Math.max(sessionEnd - windowStart, 1);
   const hasMore = sessionEnd < items.length;
   const word = items[idx];
 
-  const rec = useAutoRecorder(async (uri) => {
-    if (!uri) {
-      setErrMsg("Keine Aufnahme empfangen.");
-      setPhase("error");
-      return;
-    }
-    setPhase("processing");
+  // Die Phase ist abgeleitet, nicht gespeichert: der Rundenstatus kommt vom
+  // Transport (der Agent endpointet, nicht die App), das Ergebnis von hier.
+  const phase: Phase =
+    turn.status === "connecting" ? "connecting" :
+    turn.status === "tts" ? "tts" :
+    turn.status === "reading" ? "ready" :
+    turn.status === "listening" ? "listening" :
+    turn.status === "scoring" ? "processing" :
+    errMsg ? "error" :
+    result ? "result" :
+    // Runde vorbei, Ergebnis noch nicht im State: eine Renderphase lang weiter
+    // "Bewertung…" zeigen statt kurz auf einen leeren Block zu springen.
+    turn.status === "done" ? "processing" : "idle";
+
+  const nextTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const runWord = useCallback(async () => {
+    if (!word) return;
+    setResult(null);
+    setMeta(null);
+    setErrMsg(null);
+    // Level 5 und 6: erst hoeren, dann nachsprechen. Ab Level 7 liest das Kind
+    // selbst vor. Beides laeuft mit geschlossenem Mikrofon, damit der Agent
+    // nicht die Sprachausgabe bewertet.
+    const prelude: Prelude = ui.audioFirst
+      ? { kind: "speak", text: word.ar }
+      : { kind: "wait", ms: READ_MS };
     try {
-      const r = await assessAudioSmart(backendUrl, uri, word.ar, backendToken);
-      const { _meta, ...clean } = r as any;
-      setResult(clean);
-      setMeta(_meta);
-      setPhase("result");
+      const { result: r, timings } = await turn.runWord(word.ar, prelude);
+      setResult(r);
+      setMeta({ mode: "livekit", totalMs: timings.total_ms, turn: timings });
       const key = source ? source.keyFor(word.ar) : `${categoryId}:${word.ar}`;
       addResult(key, r.total);
       if (r.total >= MASTERY_SCORE) setWins((count) => count + 1);
@@ -99,40 +128,14 @@ export default function PlayScreen() {
           r.total >= MASTERY_SCORE
             ? Haptics.NotificationFeedbackType.Success
             : Haptics.NotificationFeedbackType.Warning,
-        );
+        ).catch(() => {});
       }
     } catch (e: any) {
+      if (isCancelled(e)) return;
       setErrMsg(e?.message ?? "Netzwerkfehler");
-      setPhase("error");
     }
-  });
-
-  const nextTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const recordStartTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const beginRecording = () => {
-    recordStartTimer.current = null;
-    setPhase("listening");
-    rec.start();
-  };
-
-  const runWord = () => {
-    if (!word) return;
-    if (recordStartTimer.current) clearTimeout(recordStartTimer.current);
-    setResult(null);
-    setErrMsg(null);
-    if (ui.audioFirst) {
-      // Level 5 und 6: erst hoeren, dann nachsprechen.
-      setPhase("tts");
-      speakArabic(word.ar, () => {
-        recordStartTimer.current = setTimeout(beginRecording, 150);
-      });
-      return;
-    }
-    // Ab Level 7 liest das Kind selbst vor - kurze Lesezeit, dann Mikrofon.
-    setPhase("ready");
-    recordStartTimer.current = setTimeout(beginRecording, 900);
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [word, ui.audioFirst, source, categoryId, addResult, turn.runWord]);
 
   const listenAgain = () => {
     if (!word) return;
@@ -140,22 +143,29 @@ export default function PlayScreen() {
     speakArabic(word.ar);
   };
 
+  const retry = () => {
+    // Laufende Runde erst abbrechen, sonst wartet die neue in der
+    // Warteschlange, bis die alte in den Timeout laeuft.
+    turn.cancel();
+    runWord();
+  };
+
   useEffect(() => {
-    if (!backendUrl || !word || roundDone) return;
+    if (!tokenEndpoint || !word || roundDone) return;
     runWord();
     return () => {
       stopSpeaking();
+      turn.cancel();
       if (nextTimer.current) clearTimeout(nextTimer.current);
-      if (recordStartTimer.current) clearTimeout(recordStartTimer.current);
-      recordStartTimer.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [idx, backendUrl, roundDone]);
+  }, [idx, tokenEndpoint, roundDone]);
 
-  // WS beim Screen-Mount vorwaermen -> erstes Wort zahlt keinen Connect-Preis.
+  // Verbindung beim Screen-Mount vorwaermen -> das erste Wort zahlt keinen
+  // Connect und keinen Modal-Kaltstart.
   useEffect(() => {
-    if (backendUrl) getStreamSession(backendUrl, backendToken).warmUp();
-  }, [backendUrl, backendToken]);
+    turn.warmUp();
+  }, [turn.warmUp]);
 
   useEffect(() => {
     if (phase !== "result" || !result) return;
@@ -184,7 +194,12 @@ export default function PlayScreen() {
   };
 
   const insets = useSafeAreaInsets();
-  const busy = phase === "tts" || phase === "ready" || phase === "listening" || phase === "processing";
+  const busy =
+    phase === "connecting" ||
+    phase === "tts" ||
+    phase === "ready" ||
+    phase === "listening" ||
+    phase === "processing";
   const footerPad = Math.max(insets.bottom, 12) + 8;
 
   if (!source) {
@@ -195,12 +210,12 @@ export default function PlayScreen() {
     );
   }
 
-  if (!backendUrl) {
+  if (!tokenEndpoint) {
     return (
       <SafeAreaView style={[styles.root, styles.center, { backgroundColor: c.background }]}>
         <Text style={[styles.title, { color: c.text }]}>Erst Backend einrichten</Text>
         <Text style={[styles.subMuted, { color: c.textMuted }]}>
-          Öffne die Einstellungen und trage die Colab-URL ein.
+          Öffne die Einstellungen und trage den Modal-Token-Endpoint ein.
         </Text>
         <Pressable
           onPress={() => router.push("/settings" as any)}
@@ -312,6 +327,12 @@ export default function PlayScreen() {
         </View>
 
         <View style={styles.phaseWrap}>
+          {phase === "connecting" && (
+            <View style={{ alignItems: "center" }}>
+              <ActivityIndicator size="large" color={c.primary} />
+              <Text style={[styles.subMuted, { color: c.textMuted }]}>Verbinde…</Text>
+            </View>
+          )}
           {phase === "tts" && (
             <View style={styles.phaseRow}>
               <Ionicons name="volume-high" size={30} color={c.info} />
@@ -326,7 +347,7 @@ export default function PlayScreen() {
           )}
           {phase === "listening" && (
             <>
-              <PulsingMic active level={rec.level} />
+              <PulsingMic active level={turn.level} />
               <Text style={[styles.phaseText, { color: c.recording, marginTop: 10 }]}>Sprich jetzt!</Text>
             </>
           )}
@@ -339,7 +360,7 @@ export default function PlayScreen() {
           {phase === "error" && (
             <View style={{ alignItems: "center" }}>
               <Text style={{ color: c.bad.base, textAlign: "center" }}>{errMsg}</Text>
-              <Pressable onPress={runWord} style={[styles.primaryBtn, { backgroundColor: c.primary }]}>
+              <Pressable onPress={retry} style={[styles.primaryBtn, { backgroundColor: c.primary }]}>
                 <Text style={[styles.primaryBtnText, { color: c.onPrimary }]}>Nochmal versuchen</Text>
               </Pressable>
             </View>
@@ -358,34 +379,41 @@ export default function PlayScreen() {
             {showDiagnostics ? (
               <>
                 <LatencyChip meta={meta ?? undefined} serverMs={result.duration_ms} />
-                {(meta?.client || result.timings) && (
+                {(meta || result.timings) && (
                   <View style={[styles.diagBox, { backgroundColor: c.background, borderColor: c.border }]}>
                     <Text style={[styles.diagTitle, { color: c.text }]}>Latenz-Analyse</Text>
-                    <DiagLine label="Modus" value="ws" bold colors={c} />
-                    {meta?.client && (
+                    <DiagLine label="Modus" value="LiveKit" bold colors={c} />
+                    {meta && (
                       <>
                         <DiagLine
-                          label="Audio (Handy → Bytes)"
-                          value={`${meta.client.bytes_read_ms} ms`}
-                          extra={`${Math.round((meta.client.bytes ?? 0) / 1024)} KB`}
+                          label="Verbindung"
+                          value={meta.turn.warm ? "warm" : `${meta.turn.connect_ms} ms (Connect)`}
                           colors={c}
                         />
                         <DiagLine
-                          label="Format für den Server"
-                          value={meta.client.wav16 ? "wav16 (Schnellpfad)" : "raw (Server dekodiert)"}
-                          extra={`Aufbereitung ${meta.client.prepare_ms} ms`}
+                          label="Agent bereit"
+                          value={`${meta.turn.ready_ms} ms`}
+                          extra={meta.turn.ready_ms > 2000 ? "Kaltstart" : undefined}
                           colors={c}
                         />
-                        <DiagLine label="WS send-Aufruf" value={`${meta.client.ws_send_ms} ms`} colors={c} />
-                        <DiagLine label="WS warm?" value={meta.client.warm ? "ja" : "nein (Connect)"} colors={c} />
-                        <DiagLine label="→ Roundtrip (rtt)" value={`${meta.client.rtt_ms} ms`} bold colors={c} />
+                        <DiagLine
+                          label="Kind spricht (bis VAD)"
+                          value={`${meta.turn.listen_ms} ms`}
+                          colors={c}
+                        />
+                        <DiagLine
+                          label="→ Wartezeit auf Score"
+                          value={`${meta.turn.score_ms} ms`}
+                          bold
+                          colors={c}
+                        />
                       </>
                     )}
                     {result.timings && (
                       <>
                         <DiagLine label="Audio-Länge (Kind spricht)" value={`${result.timings.audio_ms ?? "?"} ms`} colors={c} />
                         <DiagLine label="Preprocess (CPU)" value={`${result.timings.preprocess_ms ?? "?"} ms`} colors={c} />
-                        <DiagLine label="ASR (GPU)" value={`${result.timings.asr_ms ?? "?"} ms`} bold colors={c} />
+                        <DiagLine label="ASR (ONNX INT8)" value={`${result.timings.asr_ms ?? "?"} ms`} bold colors={c} />
                         <DiagLine label="Wort-Scoring" value={`${result.timings.score_ms ?? "?"} ms`} colors={c} />
                       </>
                     )}
@@ -422,7 +450,7 @@ export default function PlayScreen() {
         <FooterButton
           icon="mic"
           label="Nochmal"
-          onPress={() => { setResult(null); runWord(); }}
+          onPress={retry}
           disabled={busy}
           background={c.surfaceMuted}
           border={c.border}

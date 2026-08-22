@@ -1,9 +1,13 @@
-// WebSocket-only Backend-Anbindung. HTTP-Pfade wurden entfernt -
-// Bewertung und Health-Check laufen ausschliesslich ueber /stream.
+// Daten-Vertrag zum Backend + Diagnose.
+//
+// Transport ist ausschliesslich LiveKit (livekit-stream.ts); Bewertungen laufen
+// ueber useLiveKitTurn, damit die UI den Rundenstatus mitbekommt. Hier bleiben
+// nur die Typen, die das Backend sendet, und der Health-Check der Einstellungen.
+//
+// Die Typen stehen absichtlich in diesem Modul: livekit-stream.ts zieht sie per
+// `import type`, was beim Kompilieren verschwindet - also kein Zyklus.
 
-import { getStreamSession, StreamSession, type WordClientTimings } from "@/lib/stream";
-import { readUriAsArrayBuffer } from "@/lib/audioBytes";
-export { readUriAsArrayBuffer };
+import { getLiveKitSession, type LiveKitConfig, type TurnTimings } from "@/lib/livekit-stream";
 
 export type AssessUnit = {
   label: string;
@@ -19,11 +23,11 @@ export type AssessUnit = {
 };
 
 export type ServerWordTimings = {
-  audio_bytes?: number;
   audio_samples?: number;
   audio_ms?: number;
   preprocess_ms?: number;
   asr_ms?: number;
+  align_ms?: number;
   score_ms?: number;
   server_ms?: number;
 };
@@ -37,50 +41,52 @@ export type AssessResponse = {
   timings?: ServerWordTimings;
 };
 
+/** Client-Sicht auf eine Runde, fuer die Latenz-Anzeige im Elternmodus. */
 export type AssessMeta = {
-  mode: "ws";
+  mode: "livekit";
   totalMs: number;
-  client?: WordClientTimings;
+  turn: TurnTimings;
 };
 
-/** Einzelwort ueber die persistente WS-Session bewerten. */
-export async function assessAudioSmart(
-  backendUrl: string,
-  uri: string,
-  target: string,
-  token: string = "",
-): Promise<AssessResponse & { _meta: AssessMeta }> {
-  const t0 = Date.now();
-  const session = getStreamSession(backendUrl, token);
-  const { response, client } = await session.assessWord(uri, target);
-  return { ...response, _meta: { mode: "ws", totalMs: Date.now() - t0, client } };
-}
-
 // --------------------------------------------------------------------------
-// Health / Diagnose (fuer Settings-Screen) - reine WS-Pruefung.
+// Diagnose (Settings-Screen)
 // --------------------------------------------------------------------------
 
 export type HealthInfo = {
   ok: boolean;
-  hasStream: boolean;
+  /** Token-Endpoint hat geantwortet und der Room steht. */
+  hasRoom: boolean;
+  /** Der Scoring-Agent ist im Room. Ohne ihn bewertet niemand. */
+  hasAgent: boolean;
   connectMs?: number;
   error?: string;
 };
 
-export async function pingHealth(url: string, token: string = ""): Promise<boolean> {
-  return (await fetchHealth(url, token)).ok;
+export async function pingHealth(config: LiveKitConfig): Promise<boolean> {
+  return (await fetchHealth(config)).ok;
 }
 
-export async function fetchHealth(url: string, token: string = ""): Promise<HealthInfo> {
-  if (!url) return { ok: false, hasStream: false, error: "keine URL" };
-  const s = new StreamSession(url, token);
+/**
+ * Token holen, Room verbinden, pruefen ob der Agent da ist.
+ *
+ * Laeuft absichtlich ueber die Singleton-Session: der Check waermt damit gleich
+ * die Verbindung auf, die die Uebungs-Screens danach benutzen.
+ */
+export async function fetchHealth(config: LiveKitConfig): Promise<HealthInfo> {
+  if (!config.tokenEndpoint) {
+    return { ok: false, hasRoom: false, hasAgent: false, error: "kein Token-Endpoint" };
+  }
   const t0 = Date.now();
   try {
-    await s.ensureConnected();
-    return { ok: true, hasStream: true, connectMs: Date.now() - t0 };
+    const hasAgent = await getLiveKitSession(config).probe();
+    return { ok: hasAgent, hasRoom: true, hasAgent, connectMs: Date.now() - t0 };
   } catch (e: any) {
-    return { ok: false, hasStream: false, error: e?.message ?? String(e) };
-  } finally {
-    s.close();
+    return {
+      ok: false,
+      hasRoom: false,
+      hasAgent: false,
+      connectMs: Date.now() - t0,
+      error: e?.message ?? String(e),
+    };
   }
 }

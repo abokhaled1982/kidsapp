@@ -19,14 +19,13 @@ import { useProgress } from "@/store/useProgress";
 import { useTheme } from "@/store/useTheme";
 import type { ThemePalette } from "@/store/profileModel";
 import { speakArabic, stopSpeaking } from "@/lib/tts";
-import { useAyahRecorder } from "@/hooks/useAyahRecorder";
+import { useLiveKitTurn, isCancelled } from "@/hooks/useLiveKitTurn";
 import {
-  getStreamSession,
   type AyahProgress,
   type AyahWordEvent,
-  type AyahClientTimings,
   type AyahDoneEvent,
-} from "@/lib/stream";
+  type TurnTimings,
+} from "@/lib/livekit-stream";
 import { WordChip, type WordChipState } from "@/components/WordChip";
 import { PulsingMic } from "@/components/PulsingMic";
 import { StarBurst } from "@/components/StarBurst";
@@ -34,7 +33,15 @@ import { DebugOverlay } from "@/components/DebugOverlay";
 import { NetworkStatusBadge } from "@/components/NetworkStatusBadge";
 import { useDebug } from "@/store/useDebug";
 
-type Phase = "idle" | "tts" | "listening" | "scoring" | "result" | "error";
+// "connecting" ist neu: der Agent laeuft auf Modal und darf kalt starten.
+type Phase = "idle" | "connecting" | "tts" | "listening" | "scoring" | "result" | "error";
+
+// Kurzes Durchatmen, bevor das Mikrofon aufgeht - das Kind soll die Ayah erst
+// sehen. Vorher war das ein Timer vor dem Aufnahmestart.
+const READY_MS = 500;
+
+// Falls expo-speech den Callback verschluckt, darf "Anhören" nicht haengen.
+const TTS_GUARD_MS = 15000;
 
 const AR_DIGITS = ["٠", "١", "٢", "٣", "٤", "٥", "٦", "٧", "٨", "٩"];
 const toArabicNumber = (n: number) =>
@@ -73,8 +80,7 @@ export default function QuranAyahScreen() {
   const { surahId } = useLocalSearchParams<{ surahId: string }>();
   const router = useRouter();
   const c = useTheme();
-  const backendUrl = useBackend((s) => s.url);
-  const backendToken = useBackend((s) => s.token);
+  const tokenEndpoint = useBackend((s) => s.tokenEndpoint);
   const addResult  = useProgress((s) => s.addResult);
   const insets = useSafeAreaInsets();
 
@@ -88,15 +94,18 @@ export default function QuranAyahScreen() {
   const [ayahIdx, setAyahIdx] = useState(0);
   const ayah = ayat[ayahIdx];
 
-  const [phase, setPhase] = useState<Phase>("idle");
+  const turn = useLiveKitTurn();
+
   const [errMsg, setErrMsg] = useState<string | null>(null);
   const [totalScore, setTotalScore] = useState<number | null>(null);
   const [serverMs, setServerMs] = useState<number | null>(null);
+  // "ttsBusy" ist die einzige Phase, die nicht vom Transport kommt: das
+  // Anhoeren-Knopf-Vorspielen laeuft ausserhalb einer Bewertungsrunde.
+  const [ttsBusy, setTtsBusy] = useState(false);
   const [timings, setTimings] = useState<{
     done?: AyahDoneEvent;
-    client?: AyahClientTimings;
-    mode: "ws" | null;
-  }>({ mode: null });
+    client?: TurnTimings;
+  }>({});
 
   // wordStates: parallel zu ayah.words, Zustand + optional Score
   const [wordStates, setWordStates] = useState<
@@ -106,41 +115,49 @@ export default function QuranAyahScreen() {
   const nextTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const doneOnceRef = useRef<boolean>(false);
 
-  // Beim Screen-Mount: WS vorwaermen (spart 300-500ms bei der ersten Ayah).
+  // Die Phase ist abgeleitet: den Rundenverlauf kennt der Transport (der Agent
+  // endpointet serverseitig), das Ergebnis dieser Screen.
+  const phase: Phase =
+    ttsBusy ? "tts" :
+    turn.status === "connecting" ? "connecting" :
+    turn.status === "reading" ? "idle" :
+    turn.status === "listening" ? "listening" :
+    turn.status === "scoring" ? "scoring" :
+    errMsg ? "error" :
+    totalScore != null ? "result" :
+    // Runde vorbei, Ergebnis noch nicht im State: nicht kurz auf "idle" springen.
+    turn.status === "done" ? "scoring" : "idle";
+
+  // Verbindung beim Screen-Mount vorwaermen (spart Connect + Modal-Kaltstart).
   useEffect(() => {
-    if (backendUrl) {
-      getStreamSession(backendUrl, backendToken).warmUp();
-    }
-    return () => {
-      stopSpeaking();
-      if (nextTimer.current) clearTimeout(nextTimer.current);
-    };
-  }, [backendUrl, backendToken]);
+    turn.warmUp();
+  }, [turn.warmUp]);
 
   // Bei Wechsel der Ayah: States zuruecksetzen.
   useEffect(() => {
     if (!ayah) return;
-    setPhase("idle");
     setErrMsg(null);
     setTotalScore(null);
     setServerMs(null);
-    setTimings({ mode: null });
+    setTimings({});
     setWordStates(ayah.words.map(() => ({ state: "pending" })));
     doneOnceRef.current = false;
   }, [ayah]);
 
-  // ------- Aufnahme + Bewertung -------
-  const onRecordingStop = useCallback(async (uri: string | null) => {
-    if (!ayah) return;
-    useDebug.getState().push("rec_stop", uri ? `Aufnahme fertig ${uri.split("/").pop()}` : "Aufnahme leer");
-    if (!uri) {
-      setErrMsg("Keine Aufnahme empfangen.");
-      setPhase("error");
-      return;
-    }
-    setPhase("scoring");
-    // Alle Woerter auf 'scanning' -> UI zeigt Shimmer / Erwartung
+  // Sobald der Agent das Sprachende erkannt hat: alle Chips auf 'scanning'.
+  // Die word-Frames faerben sie danach einzeln um.
+  useEffect(() => {
+    if (turn.status !== "scoring" || !ayah) return;
     setWordStates(ayah.words.map(() => ({ state: "scanning" })));
+  }, [turn.status, ayah]);
+
+  // ------- Bewertung -------
+  const recite = useCallback(async () => {
+    if (!ayah) return;
+    setErrMsg(null);
+    setTotalScore(null);
+    setServerMs(null);
+    setWordStates(ayah.words.map(() => ({ state: "pending" })));
 
     const ayahText = ayah.words.map((w) => w.ar).join(" ");
     const key = (idx: number) => `quran:${surah?.n}:${ayah.n}:${ayah.words[idx]?.ar}`;
@@ -163,21 +180,18 @@ export default function QuranAyahScreen() {
       }
     };
 
-    // WS-Weg mit progressivem Streaming (einziger Pfad, HTTP entfernt).
-    if (!backendUrl) {
-      setErrMsg("Backend-URL fehlt.");
-      setPhase("error");
-      return;
-    }
+    useDebug.getState().push("rec_start", `Ayah ${ayah.n} · ${ayah.words.length} Wörter`);
     try {
-      const session = getStreamSession(backendUrl, backendToken);
-      const { done, client } = await session.assessAyah(uri, ayahText, (ev: AyahProgress) => {
-        if (ev.kind === "word") applyWord(ev);
-      });
+      const { done, timings: client } = await turn.runAyah(
+        ayahText,
+        (ev: AyahProgress) => {
+          if (ev.kind === "word") applyWord(ev);
+        },
+        { kind: "wait", ms: READY_MS },
+      );
       setTotalScore(done.total);
       setServerMs(done.duration_ms);
-      setTimings({ done, client, mode: "ws" });
-      setPhase("result");
+      setTimings({ done, client });
       if (Platform.OS !== "web") {
         Haptics.notificationAsync(
           done.total >= 75
@@ -186,45 +200,59 @@ export default function QuranAyahScreen() {
         ).catch(() => {});
       }
     } catch (e: any) {
-      useDebug.getState().push("ws_error", `WS gescheitert: ${e?.message ?? e}`);
-      setErrMsg(e?.message ?? "WebSocket-Fehler.");
-      setPhase("error");
+      if (isCancelled(e)) return;
+      useDebug.getState().push("lk_error", `Bewertung gescheitert: ${e?.message ?? e}`);
+      setErrMsg(e?.message ?? "Verbindungsfehler.");
     }
-  }, [ayah, backendUrl, surah, addResult]);
-
-  const rec = useAyahRecorder(onRecordingStop);
-
-  const startRecord = useCallback(() => {
-    if (!ayah) return;
-    setErrMsg(null);
-    setTotalScore(null);
-    setServerMs(null);
-    setWordStates(ayah.words.map(() => ({ state: "pending" })));
-    setPhase("listening");
-    useDebug.getState().push("rec_start", `Ayah ${ayah.n} · ${ayah.words.length} Wörter`);
-    rec.start();
-  }, [ayah, rec]);
-
-  // Auto-Start: 500ms nach Ayah-Load lauscht die App automatisch. Kein Button noetig.
-  // Der Recorder wartet intern (useAyahRecorder) auf Sprach-Onset via VAD-Metering und
-  // stoppt automatisch bei 700ms Stille -> "ambient" UX, wie beim Wort-Modus.
-  useEffect(() => {
-    if (!ayah || !backendUrl) return;
-    if (phase !== "idle") return;
-    const t = setTimeout(() => {
-      if (phase === "idle") startRecord();
-    }, 500);
-    return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ayah, backendUrl, phase]);
+  }, [ayah, surah, addResult, turn.runAyah]);
+
+  const retry = useCallback(() => {
+    // Laufende Runde abbrechen, sonst wartet die neue bis zum Timeout.
+    turn.cancel();
+    recite();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recite]);
+
+  // Auto-Start: die App hoert von sich aus zu, sobald die Ayah steht. Kein
+  // Knopf noetig - der Vorspann (READY_MS) haelt das Mikrofon kurz zu.
+  //
+  // Bewusst ohne Status-Guard: nach einer Runde bleibt turn.status auf "done",
+  // ein Guard darauf wuerde die naechste Ayah nie starten. Stattdessen bricht
+  // der Cleanup die alte Runde ab, wenn das Kind vorher weiterblaettert.
+  useEffect(() => {
+    if (!ayah || !tokenEndpoint) return;
+    recite();
+    return () => {
+      stopSpeaking();
+      turn.cancel();
+      if (nextTimer.current) clearTimeout(nextTimer.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ayah, tokenEndpoint]);
 
   const listenTts = useCallback(() => {
-    if (!ayah || phase === "scoring") return;
-    if (phase === "listening") rec.stop();
-    setPhase("tts");
+    if (!ayah) return;
+    // Waehrend des Vorspielens darf keine Runde laufen, sonst bewertet der
+    // Agent die Sprachausgabe.
+    turn.cancel();
+    setTtsBusy(true);
     const t = ayah.words.map((w) => w.ar).join(" ");
-    speakArabic(t, () => setPhase("idle"));
-  }, [ayah, phase, rec]);
+    // Notbremse: bleibt der TTS-Callback aus, waere die Leiste dauerhaft
+    // gesperrt (busy enthaelt "tts").
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      setTtsBusy(false);
+    };
+    const guard = setTimeout(finish, TTS_GUARD_MS);
+    speakArabic(t, () => {
+      clearTimeout(guard);
+      finish();
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ayah]);
 
   // Auto-Next bei sehr gutem Ergebnis
   useEffect(() => {
@@ -258,12 +286,12 @@ export default function QuranAyahScreen() {
       </SafeAreaView>
     );
   }
-  if (!backendUrl) {
+  if (!tokenEndpoint) {
     return (
       <SafeAreaView style={[styles.root, styles.center, { backgroundColor: c.background }]}>
         <Text style={[styles.headline, { color: c.text }]}>Backend fehlt</Text>
         <Text style={[styles.sub, { color: c.textMuted }]}>
-          Öffne die Einstellungen und trage die Colab-URL ein.
+          Öffne die Einstellungen und trage den Modal-Token-Endpoint ein.
         </Text>
         <Pressable
           onPress={() => router.push("/settings" as any)}
@@ -282,7 +310,8 @@ export default function QuranAyahScreen() {
     );
   }
 
-  const busy = phase === "listening" || phase === "scoring" || phase === "tts";
+  const busy =
+    phase === "connecting" || phase === "listening" || phase === "scoring" || phase === "tts";
   const percent = ((ayahIdx + 1) / ayat.length) * 100;
 
   return (
@@ -352,6 +381,12 @@ export default function QuranAyahScreen() {
           {phase === "idle" && (
             <Text style={[styles.hint, { color: c.text }]}>Ich höre gleich zu — rezitiere einfach los.</Text>
           )}
+          {phase === "connecting" && (
+            <View style={styles.row}>
+              <ActivityIndicator size="small" color={c.pending.text} />
+              <Text style={[styles.hint, { color: c.pending.text }]}>Verbinde…</Text>
+            </View>
+          )}
           {phase === "tts" && (
             <View style={styles.row}>
               <Ionicons name="volume-high" size={22} color={c.info} />
@@ -360,7 +395,7 @@ export default function QuranAyahScreen() {
           )}
           {phase === "listening" && (
             <>
-              <PulsingMic active level={rec.level} />
+              <PulsingMic active level={turn.level} />
               <Text style={[styles.hint, { color: c.recording, marginTop: 12 }]}>
                 Ich höre dir zu…
               </Text>
@@ -388,18 +423,11 @@ export default function QuranAyahScreen() {
                 <View
                   style={[
                     styles.modeChip,
-                    timings.mode === "ws"
-                      ? { backgroundColor: c.scanning.bg, borderColor: c.scanning.border }
-                      : { backgroundColor: c.pending.bg, borderColor: c.pending.border },
+                    { backgroundColor: c.scanning.bg, borderColor: c.scanning.border },
                   ]}
                 >
-                  <Text
-                    style={[
-                      styles.modeChipText,
-                      { color: timings.mode === "ws" ? c.scanning.text : c.pending.text },
-                    ]}
-                  >
-                    {timings.mode === "ws" ? "⚡ WebSocket-Stream" : "?"}
+                  <Text style={[styles.modeChipText, { color: c.scanning.text }]}>
+                    🎙️ LiveKit-Stream
                   </Text>
                 </View>
                 {serverMs != null && (
@@ -411,29 +439,37 @@ export default function QuranAyahScreen() {
               {(timings.client || timings.done?.timings) && (
                 <View style={[styles.diagBox, { backgroundColor: c.background, borderColor: c.border }]}>
                   <Text style={[styles.diagTitle, { color: c.text }]}>Latenz-Analyse</Text>
-                  <DiagLine label="Modus"                value={timings.mode ?? "?"} bold colors={c} />
+                  <DiagLine label="Modus" value="LiveKit" bold colors={c} />
                   {timings.client && (
                     <>
-                      <DiagLine label="Audio (Handy → Bytes)"    value={`${timings.client.bytes_read_ms} ms`} extra={`${Math.round((timings.client.bytes ?? 0) / 1024)} KB`} colors={c} />
-                      <DiagLine label="Format für den Server"    value={timings.client.wav16 ? "wav16 (Schnellpfad)" : "raw (Server dekodiert)"} extra={`Aufbereitung ${timings.client.prepare_ms} ms`} colors={c} />
-                      <DiagLine label="WS send-Aufruf"           value={`${timings.client.ws_send_ms} ms`} colors={c} />
-                      <DiagLine label="→ Erstes Server-Frame"    value={`${timings.client.first_frame_ms} ms`} bold colors={c} />
-                      <DiagLine label="→ Letztes Frame (done)"   value={`${timings.client.last_frame_ms} ms`} bold colors={c} />
+                      <DiagLine
+                        label="Verbindung"
+                        value={timings.client.warm ? "warm" : `${timings.client.connect_ms} ms (Connect)`}
+                        colors={c}
+                      />
+                      <DiagLine
+                        label="Agent bereit"
+                        value={`${timings.client.ready_ms} ms`}
+                        extra={timings.client.ready_ms > 2000 ? "Kaltstart" : undefined}
+                        colors={c}
+                      />
+                      <DiagLine label="Kind rezitiert (bis VAD)" value={`${timings.client.listen_ms} ms`} colors={c} />
+                      <DiagLine label="→ Erstes Wort-Frame"      value={`${timings.client.score_ms} ms`} bold colors={c} />
+                      <DiagLine label="→ Rest des Streams"       value={`${timings.client.stream_ms} ms`} bold colors={c} />
                     </>
                   )}
                   {timings.done?.timings && (
                     <>
                       <DiagLine label="Audio-Länge (Kind spricht)" value={`${timings.done.timings.audio_ms ?? "?"} ms`} colors={c} />
-                      <DiagLine label="Bytes empfangen (Server)"   value={`${timings.done.timings.bytes_recv_ms ?? "?"} ms`} colors={c} />
                       <DiagLine label="Preprocess (CPU)"           value={`${timings.done.timings.preprocess_ms} ms`} colors={c} />
-                      <DiagLine label="ASR (GPU)"                  value={`${timings.done.timings.asr_ms} ms`} bold colors={c} />
+                      <DiagLine label="ASR (ONNX INT8)"            value={`${timings.done.timings.asr_ms} ms`} bold colors={c} />
                       <DiagLine label="Forced-Align"               value={`${timings.done.timings.align_ms} ms`} colors={c} />
                       <DiagLine label="Wort-Scoring"               value={`${timings.done.timings.score_ms} ms`} colors={c} />
                     </>
                   )}
                   {!timings.done?.timings && (
                     <Text style={[styles.diagMutedNote, { color: c.textMuted }]}>
-                      Server-Timings fehlen — vermutlich WS-Fehler vor dem done-Frame.
+                      Server-Timings fehlen — vermutlich Abbruch vor dem done-Frame.
                     </Text>
                   )}
                 </View>
@@ -494,7 +530,7 @@ export default function QuranAyahScreen() {
 
         {phase === "listening" ? (
           <Pressable
-            onPress={rec.stop}
+            onPress={turn.flush}
             style={({ pressed }) => [
               styles.primaryBtnBig,
               { backgroundColor: c.good.base },
@@ -506,7 +542,7 @@ export default function QuranAyahScreen() {
           </Pressable>
         ) : phase === "result" || phase === "error" ? (
           <Pressable
-            onPress={startRecord}
+            onPress={retry}
             style={({ pressed }) => [
               styles.primaryBtnBig,
               { backgroundColor: c.recording },
@@ -520,7 +556,13 @@ export default function QuranAyahScreen() {
           <View style={[styles.primaryBtnBig, { backgroundColor: c.surfaceMuted }]}>
             <ActivityIndicator size="small" color={c.pending.text} />
             <Text style={[styles.primaryBtnBigText, { color: c.pending.text }]}>
-              {phase === "tts" ? "Höre zu…" : phase === "scoring" ? "Bewertung…" : "Bereit"}
+              {phase === "tts"
+                ? "Höre zu…"
+                : phase === "connecting"
+                  ? "Verbinde…"
+                  : phase === "scoring"
+                    ? "Bewertung…"
+                    : "Bereit"}
             </Text>
           </View>
         )}

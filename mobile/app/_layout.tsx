@@ -3,6 +3,11 @@ import { StatusBar } from "expo-status-bar";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { useTheme } from "@/store/useTheme";
 
+// Richtet die WebRTC-Globals ein (siehe src/lib/webrtc.ts) und faengt das
+// fehlende native Modul ab, damit alle nicht-LiveKit-Screens auch in Expo Go
+// laufen. Import nur wegen des Seiteneffekts.
+import "@/lib/webrtc";
+
 export default function RootLayout() {
   const c = useTheme();
 

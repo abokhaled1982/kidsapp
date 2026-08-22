@@ -1,5 +1,9 @@
 // Prominenter Status-Chip fuer den Quran-Screen. Beantwortet die eine Frage:
-// "Läuft die WebSocket-Verbindung sauber?" HTTP ist vollständig entfernt.
+// "Steht die LiveKit-Verbindung?" HTTP und WebSocket sind vollständig entfernt.
+//
+// Anders als beim alten WS-Chip gibt es hier einen echten Verbindungszustand:
+// LiveKit haelt den Room offen und meldet Reconnects, also wird das gezeigt,
+// statt nur aus der letzten Bewertung zu raten.
 
 import { View, Text, StyleSheet, Platform } from "react-native";
 import { useDebug } from "@/store/useDebug";
@@ -7,25 +11,35 @@ import { useTheme } from "@/store/useTheme";
 
 export function NetworkStatusBadge() {
   const c = useTheme();
-  const lastMode  = useDebug((s) => s.lastMode);
-  const wsOk      = useDebug((s) => s.wsOk);
-  const wsErr     = useDebug((s) => s.wsErr);
+  const link      = useDebug((s) => s.link);
+  const okCount   = useDebug((s) => s.okCount);
+  const errCount  = useDebug((s) => s.errCount);
   const lastError = useDebug((s) => s.lastError);
 
   // Der Chip nimmt den passenden Zustands-Ton aus dem Theme:
   // ruhig = pending, aktiv = scanning, Fehler = bad.
   let tone = c.pending;
   let title = "Bereit";
-  let subtitle = "WebSocket wird bei der nächsten Aufnahme genutzt";
+  let subtitle = "LiveKit verbindet bei der nächsten Runde";
 
-  if (lastMode === "ws") {
+  if (link === "connected") {
     tone = c.scanning;
-    title = "✅ WebSocket AKTIV";
-    subtitle = `${wsOk} erfolgreich${wsErr ? ` · ${wsErr} Fehler` : ""}`;
-  } else if (wsErr > 0) {
+    title = "✅ LiveKit VERBUNDEN";
+    subtitle = okCount
+      ? `${okCount} bewertet${errCount ? ` · ${errCount} Fehler` : ""}`
+      : "Room steht · Agent wartet";
+  } else if (link === "reconnecting") {
+    tone = c.pending;
+    title = "… LiveKit verbindet neu";
+    subtitle = "Netz kurz weg — bitte einen Moment warten";
+  } else if (link === "down") {
     tone = c.bad;
-    title = "⚠️ WebSocket-Fehler";
-    subtitle = `${wsErr} Fehler bisher · letzter unten`;
+    title = "⚠️ LiveKit getrennt";
+    subtitle = "Verbindung beendet · nächste Runde baut sie neu auf";
+  } else if (errCount > 0) {
+    tone = c.bad;
+    title = "⚠️ LiveKit-Fehler";
+    subtitle = `${errCount} Fehler bisher · letzter unten`;
   }
 
   return (
@@ -35,12 +49,12 @@ export function NetworkStatusBadge() {
         <Text style={[styles.title, { color: tone.text }]}>{title}</Text>
       </View>
       <Text style={[styles.sub, { color: tone.text }]}>{subtitle}</Text>
-      {(wsOk + wsErr) > 0 && (
+      {(okCount + errCount) > 0 && (
         <View style={styles.counts}>
           <Text style={[styles.count, { color: c.textMuted }]}>
-            WS: <Text style={[styles.countStrong, { color: c.good.text }]}>{wsOk}</Text>
-            {wsErr > 0 && (
-              <Text style={[styles.countStrong, { color: c.bad.text }]}> / {wsErr} ⚠</Text>
+            LK: <Text style={[styles.countStrong, { color: c.good.text }]}>{okCount}</Text>
+            {errCount > 0 && (
+              <Text style={[styles.countStrong, { color: c.bad.text }]}> / {errCount} ⚠</Text>
             )}
           </Text>
         </View>

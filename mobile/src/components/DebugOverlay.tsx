@@ -1,23 +1,33 @@
 import { useState } from "react";
 import { View, Text, StyleSheet, Pressable, ScrollView, Modal } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { useDebug, type DebugEvent } from "@/store/useDebug";
+import { useDebug, type DebugEvent, type DebugKind, type LinkState } from "@/store/useDebug";
 
-// Kompakter Debug-Chip am Bildschirmrand. Zeigt: Modus + letzter Event.
+// Kompakter Debug-Chip am Bildschirmrand. Zeigt: Verbindung + letzter Event.
 // Antippen -> Vollbild-Log mit allen Events der Session.
 
-const KIND_COLOR: Record<string, string> = {
-  ws_open:        "#22d3ee",
-  ws_ayah_start:  "#38bdf8",
-  ws_ayah_first:  "#a78bfa",
-  ws_ayah_done:   "#4ade80",
-  ws_error:       "#f87171",
-  http_start:     "#fbbf24",
-  http_done:      "#facc15",
-  http_error:     "#f97316",
+const KIND_COLOR: Partial<Record<DebugKind, string>> = {
+  lk_connect:     "#22d3ee",
+  lk_reconnect:   "#fbbf24",
+  lk_close:       "#f97316",
+  lk_ready:       "#38bdf8",
+  lk_scoring:     "#a78bfa",
+  lk_word:        "#4ade80",
+  lk_ayah_start:  "#38bdf8",
+  lk_ayah_done:   "#4ade80",
+  lk_error:       "#f87171",
   rec_start:      "#94a3b8",
   rec_stop:       "#94a3b8",
   note:           "#e2e8f0",
+};
+
+// Der Punkt zeigt den Room-Zustand, nicht den letzten Event: bei LiveKit ist
+// "steht die Verbindung noch?" die Frage, die man im Feld beantworten muss.
+const LINK_COLOR: Record<LinkState, string> = {
+  unknown:      "#64748b",
+  connected:    "#22d3ee",
+  reconnecting: "#fbbf24",
+  down:         "#f87171",
 };
 
 function fmtTime(ms: number) {
@@ -28,18 +38,15 @@ function fmtTime(ms: number) {
 export function DebugOverlay() {
   const events = useDebug((s) => s.events);
   const lastMode = useDebug((s) => s.lastMode);
+  const link = useDebug((s) => s.link);
   const clear = useDebug((s) => s.clear);
   const [open, setOpen] = useState(false);
   const last = events[0];
 
-  const modeColor =
-    lastMode === "ws" ? "#22d3ee" :
-    "#64748b";
-
   return (
     <>
       <Pressable onPress={() => setOpen(true)} style={styles.bar}>
-        <View style={[styles.dot, { backgroundColor: modeColor }]} />
+        <View style={[styles.dot, { backgroundColor: LINK_COLOR[link] }]} />
         <Text style={styles.mode}>{lastMode.toUpperCase()}</Text>
         <Text style={styles.msg} numberOfLines={1}>
           {last ? `${fmtTime(last.ts)}  ${last.kind}  ${last.msg}` : "kein Event bisher"}
@@ -63,7 +70,7 @@ export function DebugOverlay() {
           <ScrollView contentContainerStyle={styles.list}>
             {events.length === 0 ? (
               <Text style={styles.empty}>
-                Noch keine Events. Aufnehmen, dann kommen hier alle Client-Timings rein.
+                Noch keine Events. Eine Runde sprechen, dann kommen hier alle Timings rein.
               </Text>
             ) : (
               events.map((e) => <EventRow key={e.id} ev={e} />)

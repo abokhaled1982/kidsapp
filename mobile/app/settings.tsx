@@ -9,8 +9,8 @@ import { useTheme } from "@/store/useTheme";
 import { themeForStyle } from "@/store/profileFlow";
 import { PROFILE_THEMES, type LearningLevel, type ProfileStyle } from "@/store/profileModel";
 import { levelsInOrder } from "@/store/levelFlow";
-import { pingHealth } from "@/lib/api";
-import { closeStreamSession, StreamSession } from "@/lib/stream";
+import { fetchHealth } from "@/lib/api";
+import { closeLiveKitSession } from "@/lib/livekit-stream";
 
 const STYLE_OPTIONS: { value: ProfileStyle; emoji: string; label: string }[] = [
   { value: "girl", emoji: "🌸", label: "Mädchen" },
@@ -21,43 +21,47 @@ const STYLE_OPTIONS: { value: ProfileStyle; emoji: string; label: string }[] = [
 export default function SettingsScreen() {
   const router = useRouter();
   const c = useTheme();
-  const savedUrl = useBackend((s) => s.url);
-  const savedToken = useBackend((s) => s.token);
-  const setUrl = useBackend((s) => s.setUrl);
-  const setToken = useBackend((s) => s.setToken);
+  const savedEndpoint = useBackend((s) => s.tokenEndpoint);
+  const identity = useBackend((s) => s.identity);
+  const setTokenEndpoint = useBackend((s) => s.setTokenEndpoint);
   const profile = useProfile((s) => s.profile);
   const updateProfile = useProfile((s) => s.updateProfile);
   const clearProfile = useProfile((s) => s.clearProfile);
-  const [draft, setDraft] = useState(savedUrl);
-  const [draftToken, setDraftToken] = useState(savedToken);
+  const [draft, setDraft] = useState(savedEndpoint);
   const [check, setCheck] = useState<"idle" | "checking" | "ok" | "fail">("idle");
   const [diag, setDiag] = useState<string | null>(null);
 
   const save = async () => {
-    setUrl(draft);
-    setToken(draftToken);
-    closeStreamSession();
+    setTokenEndpoint(draft);
+    // Die alte Session haengt am alten Endpoint - erst schliessen, sonst
+    // bewertet weiter das vorige Deployment.
+    closeLiveKitSession();
     setCheck("checking");
-    const ok = await pingHealth(draft, draftToken);
-    setCheck(ok ? "ok" : "fail");
-    if (ok) setTimeout(() => router.back(), 700);
+    const health = await fetchHealth({ tokenEndpoint: draft.trim().replace(/\/$/, ""), identity });
+    setCheck(health.ok ? "ok" : "fail");
+    if (health.ok) setTimeout(() => router.back(), 700);
   };
 
+  // Drei Stufen, die getrennt fehlschlagen koennen: Token holen, Room
+  // verbinden, Agent im Room. Ohne den Agenten steht die Verbindung, aber
+  // niemand bewertet - deshalb wird er einzeln ausgewiesen.
   const runDiagnostic = async () => {
-    const url = draft || savedUrl;
-    const token = draftToken || savedToken;
-    if (!url) { setDiag("❌ Keine Backend-URL gesetzt."); return; }
-    setDiag("Verbinde WebSocket …");
-    const s = new StreamSession(url, token);
-    const t0 = Date.now();
-    try {
-      await s.ensureConnected();
-      setDiag(`✅ WebSocket verbunden in ${Date.now() - t0} ms\n   ${url.replace(/^http/, "ws")}/stream`);
-    } catch (e: any) {
-      setDiag(`❌ WebSocket-Fehler: ${e?.message ?? e}`);
-    } finally {
-      s.close();
-    }
+    const endpoint = (draft || savedEndpoint).trim().replace(/\/$/, "");
+    if (!endpoint) { setDiag("❌ Kein Token-Endpoint gesetzt."); return; }
+    setDiag("Hole Token, verbinde Room …");
+    closeLiveKitSession();
+    const health = await fetchHealth({ tokenEndpoint: endpoint, identity });
+    const lines = [
+      `Endpoint : ${endpoint}`,
+      `Identity : ${identity}`,
+      health.hasRoom ? "✅ Token + Room  verbunden" : "❌ Token/Room   fehlgeschlagen",
+      health.hasAgent
+        ? "✅ Scoring-Agent im Room"
+        : "❌ Scoring-Agent fehlt — läuft der Modal-Agent?",
+    ];
+    if (health.connectMs !== undefined) lines.push(`Dauer    : ${health.connectMs} ms`);
+    if (health.error) lines.push(`Fehler   : ${health.error}`);
+    setDiag(lines.join("\n"));
   };
 
   // Stil UND Theme zusammen schreiben, sonst laufen die beiden Felder auseinander.
@@ -96,11 +100,11 @@ export default function SettingsScreen() {
           </View>
 
           <View style={styles.body}>
-            <Text style={[styles.label, { color: c.text }]}>Backend-URL</Text>
+            <Text style={[styles.label, { color: c.text }]}>LiveKit Token-Endpoint</Text>
             <TextInput
               value={draft}
               onChangeText={setDraft}
-              placeholder="https://xxxx.modal.run"
+              placeholder="https://xxxx--quran-livekit-get-token.modal.run"
               placeholderTextColor={c.textMuted}
               autoCapitalize="none"
               autoCorrect={false}
@@ -108,22 +112,18 @@ export default function SettingsScreen() {
               style={[styles.input, { backgroundColor: c.surface, borderColor: c.border, color: c.text }]}
             />
             <Text style={[styles.hint, { color: c.textMuted }]}>
-              Modal-Deployment (z. B. https://…--quran-asr-asr-web.modal.run).
+              Einzige Adresse, die die App braucht: sie liefert Token, LiveKit-URL und Room.
             </Text>
 
-            <Text style={[styles.label, { color: c.text, marginTop: 12 }]}>Auth-Token</Text>
-            <TextInput
-              value={draftToken}
-              onChangeText={setDraftToken}
-              placeholder="Bearer-Token vom Backend"
-              placeholderTextColor={c.textMuted}
-              autoCapitalize="none"
-              autoCorrect={false}
-              secureTextEntry
-              style={[styles.input, { backgroundColor: c.surface, borderColor: c.border, color: c.text }]}
-            />
+            <Text style={[styles.label, { color: c.text, marginTop: 12 }]}>Geräte-Identity</Text>
+            <View style={[styles.input, styles.readonly, { backgroundColor: c.surfaceMuted, borderColor: c.border }]}>
+              <Text style={[styles.readonlyText, { color: c.textMuted }]} numberOfLines={1}>
+                {identity}
+              </Text>
+            </View>
             <Text style={[styles.hint, { color: c.textMuted }]}>
-              Wird als ?token=… an /stream angehängt. Leer lassen, wenn Backend ohne Auth.
+              Automatisch erzeugt, kein Personenbezug. Bestimmt den eigenen Room —
+              zwei Geräte hören sich dadurch nicht gegenseitig.
             </Text>
 
             <Pressable onPress={save} style={[styles.saveBtn, { backgroundColor: c.primary }]}>
@@ -133,10 +133,11 @@ export default function SettingsScreen() {
 
             <View style={[styles.toggleCard, { backgroundColor: c.surface, borderColor: c.border }]}>
               <View style={{ flex: 1 }}>
-                <Text style={[styles.toggleTitle, { color: c.text }]}>⚡ WebSocket-Modus</Text>
+                <Text style={[styles.toggleTitle, { color: c.text }]}>🎙️ LiveKit-Modus</Text>
                 <Text style={[styles.toggleHint, { color: c.textMuted }]}>
-                  Bewertung läuft über eine persistente WebSocket-Verbindung.
-                  HTTP wurde entfernt — fällt der Tunnel aus, zeigt die App eine
+                  Das Mikrofon streamt live in den Room; der Agent erkennt selbst,
+                  wann das Kind fertig gesprochen hat. HTTP und WebSocket wurden
+                  entfernt — fällt die Verbindung aus, zeigt die App eine
                   Fehlermeldung an.
                 </Text>
               </View>
@@ -239,7 +240,7 @@ export default function SettingsScreen() {
               style={[styles.diagBtn, { backgroundColor: c.surfaceMuted, borderColor: c.border }]}
             >
               <Ionicons name="pulse" size={18} color={c.text} />
-              <Text style={[styles.diagBtnText, { color: c.text }]}>Backend & WebSocket testen</Text>
+              <Text style={[styles.diagBtnText, { color: c.text }]}>Token, Room & Agent testen</Text>
             </Pressable>
             <Pressable
               onPress={resetProfile}
@@ -287,6 +288,8 @@ const styles = StyleSheet.create({
     fontSize: 15,
   },
   hint: { fontSize: 12 },
+  readonly: { justifyContent: "center" },
+  readonlyText: { fontSize: 13, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace" },
   saveBtn: {
     marginTop: 8,
     borderRadius: 22,
